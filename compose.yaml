@@ -1,0 +1,42 @@
+# Pinned so the volume is always orchard_orchard-data, whatever the directory
+# is called.
+name: orchard
+
+services:
+  orchard:
+    build: .
+    image: orchard:latest
+    restart: unless-stopped
+    # ORCHARD_API_KEY lives here, never on the command line.
+    env_file:
+      - .env
+    # Bound to loopback: put a TLS-terminating reverse proxy in front.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # A named volume inherits the image's ownership, so it works with the
+      # container's non-root user out of the box. To use a host path instead,
+      # replace this with `- ./data:/data` and run `chown -R 10001:999 ./data`
+      # first, otherwise the container cannot write to it.
+      - orchard-data:/data
+    # The daemon sandboxes itself with unshare(CLONE_NEWUSER|NEWNS|NEWPID), then
+    # bind-mounts /dev/urandom, chroots into rootfs/ and mounts a fresh procfs.
+    # Two Docker defaults block that, and both must be relaxed:
+    #
+    #   seccomp=unconfined      the default profile only permits unshare with
+    #                           CAP_SYS_ADMIN, which this container does not have
+    #   systempaths=unconfined  Docker masks /proc/bus, /proc/fs, /proc/irq and
+    #                           /proc/sys with read-only submounts; the kernel
+    #                           then refuses the daemon's procfs mount as
+    #                           "too revealing" (EPERM)
+    #
+    # This is still much weaker than --privileged: the container keeps its
+    # default capability set (CapEff is empty) and runs as a non-root user.
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+    # On Ubuntu 24.04+ also either add `- apparmor=unconfined` above or set
+    # `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on the host.
+
+volumes:
+  orchard-data:
