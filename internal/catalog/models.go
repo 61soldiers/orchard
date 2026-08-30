@@ -27,6 +27,7 @@ type Song struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	ArtistName    string   `json:"artistName"`
+	ArtistID      string   `json:"artistId,omitempty"`
 	AlbumID       string   `json:"albumId,omitempty"`
 	AlbumName     string   `json:"albumName,omitempty"`
 	ComposerName  string   `json:"composerName,omitempty"`
@@ -48,6 +49,7 @@ type Album struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	ArtistName    string   `json:"artistName"`
+	ArtistID      string   `json:"artistId,omitempty"`
 	TrackCount    int      `json:"trackCount,omitempty"`
 	ReleaseDate   string   `json:"releaseDate,omitempty"`
 	RecordLabel   string   `json:"recordLabel,omitempty"`
@@ -63,14 +65,25 @@ type Album struct {
 	Tracks        []Song   `json:"tracks,omitempty"`
 }
 
-// Artist is a catalog artist. Albums is populated by Artist().
+// Artist is a catalog artist. The lists past Artwork are populated only by
+// Artist() (from Apple's "views"), never by search.
 type Artist struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Genres  []string `json:"genres,omitempty"`
-	Notes   string   `json:"notes,omitempty"`
-	Artwork *Artwork `json:"artwork,omitempty"`
-	Albums  []Album  `json:"albums,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Genres       []string `json:"genres,omitempty"`
+	Notes        string   `json:"notes,omitempty"`
+	Origin       string   `json:"origin,omitempty"`
+	BornOrFormed string   `json:"bornOrFormed,omitempty"`
+	Artwork      *Artwork `json:"artwork,omitempty"`
+
+	Albums          []Album    `json:"albums,omitempty"`          // full-albums
+	LatestRelease   *Album     `json:"latestRelease,omitempty"`   // latest-release
+	Singles         []Album    `json:"singles,omitempty"`         // singles
+	Compilations    []Album    `json:"compilations,omitempty"`    // compilation-albums
+	AppearsOn       []Album    `json:"appearsOn,omitempty"`       // appears-on-albums
+	TopSongs        []Song     `json:"topSongs,omitempty"`        // top-songs
+	SimilarArtists  []Artist   `json:"similarArtists,omitempty"`  // similar-artists
+	ArtistPlaylists []Playlist `json:"artistPlaylists,omitempty"` // artist-playlists
 }
 
 // Playlist is a catalog playlist. Tracks is populated by Playlist().
@@ -91,6 +104,25 @@ type SearchResults struct {
 	Albums    []Album    `json:"albums,omitempty"`
 	Artists   []Artist   `json:"artists,omitempty"`
 	Playlists []Playlist `json:"playlists,omitempty"`
+}
+
+// Charts is Apple's catalog top-charts response, split by resource type. A
+// caller asks for a subset via the types parameter; the rest stay empty.
+type Charts struct {
+	Songs     []Song     `json:"songs,omitempty"`
+	Albums    []Album    `json:"albums,omitempty"`
+	Playlists []Playlist `json:"playlists,omitempty"`
+}
+
+// EditorialGroup is one titled row of Apple's editorial "Browse" content
+// (New Music, Best New Songs, mood/activity collections and so on). Items
+// reuses the same minimal, mixed-type shape the personalization endpoints
+// return; fetch a full resource by ID/Type through the regular catalog
+// endpoints once the user opens it.
+type EditorialGroup struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+	Items []Item `json:"items"`
 }
 
 // Lyrics is a single lyrics document. Apple returns TTML.
@@ -256,6 +288,9 @@ type rawArtistAttrs struct {
 	Name           string      `json:"name"`
 	GenreNames     []string    `json:"genreNames"`
 	EditorialNotes *rawNotes   `json:"editorialNotes"`
+	ArtistBio      string      `json:"artistBio"`
+	BornOrFormed   string      `json:"bornOrFormed"`
+	Origin         string      `json:"origin"`
 	Artwork        *rawArtwork `json:"artwork"`
 }
 
@@ -271,16 +306,26 @@ type rawPlaylistAttrs struct {
 
 // rawSong carries its albums relationship: Apple includes the related
 // resource's id by default, without needing an "include" query parameter.
+type rawIDList struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+func (l rawIDList) first() string {
+	if len(l.Data) > 0 {
+		return l.Data[0].ID
+	}
+	return ""
+}
+
 type rawSong struct {
 	ID            string       `json:"id"`
 	Type          string       `json:"type"`
 	Attributes    rawSongAttrs `json:"attributes"`
 	Relationships struct {
-		Albums struct {
-			Data []struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		} `json:"albums"`
+		Albums  rawIDList `json:"albums"`
+		Artists rawIDList `json:"artists"`
 	} `json:"relationships"`
 }
 
@@ -291,16 +336,32 @@ type rawAlbum struct {
 		Tracks struct {
 			Data []rawSong `json:"data"`
 		} `json:"tracks"`
+		Artists rawIDList `json:"artists"`
 	} `json:"relationships"`
+}
+
+type rawAlbumList struct {
+	Data []rawAlbum `json:"data"`
 }
 
 type rawArtist struct {
 	ID         string         `json:"id"`
 	Attributes rawArtistAttrs `json:"attributes"`
 	Views      struct {
-		FullAlbums struct {
-			Data []rawAlbum `json:"data"`
-		} `json:"full-albums"`
+		FullAlbums        rawAlbumList `json:"full-albums"`
+		LatestRelease     rawAlbumList `json:"latest-release"`
+		Singles           rawAlbumList `json:"singles"`
+		CompilationAlbums rawAlbumList `json:"compilation-albums"`
+		AppearsOnAlbums   rawAlbumList `json:"appears-on-albums"`
+		TopSongs          struct {
+			Data []rawSong `json:"data"`
+		} `json:"top-songs"`
+		SimilarArtists struct {
+			Data []rawArtist `json:"data"`
+		} `json:"similar-artists"`
+		ArtistPlaylists struct {
+			Data []rawPlaylist `json:"data"`
+		} `json:"artist-playlists"`
 	} `json:"views"`
 }
 
@@ -313,6 +374,85 @@ type rawPlaylist struct {
 			Next string    `json:"next"`
 		} `json:"tracks"`
 	} `json:"relationships"`
+}
+
+// rawChartTable is one chart in a charts response: a resource type's ranked
+// list. Apple nests the ranked resources under "data".
+type rawChartResponse struct {
+	Results struct {
+		Songs []struct {
+			Data []rawSong `json:"data"`
+		} `json:"songs"`
+		Albums []struct {
+			Data []rawAlbum `json:"data"`
+		} `json:"albums"`
+		Playlists []struct {
+			Data []rawPlaylist `json:"data"`
+		} `json:"playlists"`
+	} `json:"results"`
+}
+
+// rawEditorialResponse and rawEditorialNode model Apple's editorial
+// "groupings" tree loosely: a groupings doc holds tabs, tabs hold children,
+// and somewhere in that tree are nodes that carry a "contents" relationship
+// of real catalog resources. collectEditorialGroups walks it and turns every
+// such node into one EditorialGroup. The shape drifts between storefronts
+// and over time, so anything that does not match simply yields no groups
+// rather than an error.
+type rawEditorialResponse struct {
+	Data []rawEditorialNode `json:"data"`
+}
+
+type rawEditorialNode struct {
+	ID         string `json:"id"`
+	Type       string `json:"type"`
+	Attributes struct {
+		Title       rawDisplayString `json:"title"`
+		Name        string           `json:"name"`
+		DisplayName string           `json:"displayName"`
+	} `json:"attributes"`
+	Relationships struct {
+		Tabs struct {
+			Data []rawEditorialNode `json:"data"`
+		} `json:"tabs"`
+		Children struct {
+			Data []rawEditorialNode `json:"data"`
+		} `json:"children"`
+		Contents struct {
+			Data []rawMixedResource `json:"data"`
+		} `json:"contents"`
+	} `json:"relationships"`
+}
+
+func (n rawEditorialNode) title() string {
+	switch {
+	case n.Attributes.Title.StringForDisplay != "":
+		return n.Attributes.Title.StringForDisplay
+	case n.Attributes.DisplayName != "":
+		return n.Attributes.DisplayName
+	default:
+		return n.Attributes.Name
+	}
+}
+
+// collectEditorialGroups walks the tabs/children tree depth-first, emitting
+// one EditorialGroup for every node that has a non-empty contents list.
+func collectEditorialGroups(nodes []rawEditorialNode, out *[]EditorialGroup) {
+	for _, n := range nodes {
+		if contents := n.Relationships.Contents.Data; len(contents) > 0 {
+			g := EditorialGroup{ID: n.ID, Title: n.title()}
+			for _, res := range contents {
+				if it, ok := toItem(res); ok {
+					g.Items = append(g.Items, it)
+				}
+			}
+			if len(g.Items) > 0 {
+				*out = append(*out, g)
+			}
+		}
+		collectEditorialGroups(n.Relationships.Tabs.Data, out)
+		collectEditorialGroups(n.Relationships.Children.Data, out)
+	}
 }
 
 type rawSearchResponse struct {
@@ -399,13 +539,10 @@ func notesText(n *rawNotes) string {
 
 func convSong(r rawSong) Song {
 	a := r.Attributes
-	var albumID string
-	if data := r.Relationships.Albums.Data; len(data) > 0 {
-		albumID = data[0].ID
-	}
 	return Song{
 		ID: r.ID, Name: a.Name, ArtistName: a.ArtistName,
-		AlbumID: albumID, AlbumName: a.AlbumName,
+		ArtistID: r.Relationships.Artists.first(),
+		AlbumID:  r.Relationships.Albums.first(), AlbumName: a.AlbumName,
 		ComposerName: a.ComposerName, DiscNumber: a.DiscNumber, TrackNumber: a.TrackNumber,
 		DurationMs: a.DurationInMillis, ISRC: a.ISRC, ReleaseDate: a.ReleaseDate,
 		Genres: a.GenreNames, ContentRating: a.ContentRating,
@@ -417,7 +554,8 @@ func convSong(r rawSong) Song {
 func convAlbum(r rawAlbum) Album {
 	a := r.Attributes
 	out := Album{
-		ID: r.ID, Name: a.Name, ArtistName: a.ArtistName, TrackCount: a.TrackCount,
+		ID: r.ID, Name: a.Name, ArtistName: a.ArtistName, ArtistID: r.Relationships.Artists.first(),
+		TrackCount:  a.TrackCount,
 		ReleaseDate: a.ReleaseDate, RecordLabel: a.RecordLabel, Copyright: a.Copyright,
 		UPC: a.UPC, Genres: a.GenreNames, ContentRating: a.ContentRating,
 		IsSingle: a.IsSingle, IsCompilation: a.IsCompilation, Notes: notesText(a.EditorialNotes),
@@ -433,12 +571,45 @@ func convAlbum(r rawAlbum) Album {
 
 func convArtist(r rawArtist) Artist {
 	a := r.Attributes
+	notes := a.ArtistBio
+	if notes == "" {
+		notes = notesText(a.EditorialNotes)
+	}
 	out := Artist{
 		ID: r.ID, Name: a.Name, Genres: a.GenreNames,
-		Notes: notesText(a.EditorialNotes), Artwork: convArtwork(a.Artwork),
+		Notes: notes, Origin: a.Origin, BornOrFormed: a.BornOrFormed,
+		Artwork: convArtwork(a.Artwork),
 	}
-	for _, al := range r.Views.FullAlbums.Data {
-		out.Albums = append(out.Albums, convAlbum(al))
+
+	convAlbums := func(list []rawAlbum) []Album {
+		if len(list) == 0 {
+			return nil
+		}
+		out := make([]Album, 0, len(list))
+		for _, al := range list {
+			out = append(out, convAlbum(al))
+		}
+		return out
+	}
+
+	v := r.Views
+	out.Albums = convAlbums(v.FullAlbums.Data)
+	out.Singles = convAlbums(v.Singles.Data)
+	out.Compilations = convAlbums(v.CompilationAlbums.Data)
+	out.AppearsOn = convAlbums(v.AppearsOnAlbums.Data)
+	if latest := convAlbums(v.LatestRelease.Data); len(latest) > 0 {
+		out.LatestRelease = &latest[0]
+	}
+	for _, s := range v.TopSongs.Data {
+		if s.Type == "" || s.Type == "songs" {
+			out.TopSongs = append(out.TopSongs, convSong(s))
+		}
+	}
+	for _, sa := range v.SimilarArtists.Data {
+		out.SimilarArtists = append(out.SimilarArtists, convArtist(sa))
+	}
+	for _, p := range v.ArtistPlaylists.Data {
+		out.ArtistPlaylists = append(out.ArtistPlaylists, convPlaylist(p))
 	}
 	return out
 }

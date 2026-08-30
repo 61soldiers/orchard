@@ -126,3 +126,52 @@ func (s *Server) handleLyrics(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, lyrics)
 }
+
+func (s *Server) handleCharts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	var types []string
+	if raw := strings.TrimSpace(q.Get("types")); raw != "" {
+		for _, t := range strings.Split(raw, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				types = append(types, t)
+			}
+		}
+	}
+
+	limit := 0
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_query", "limit must be a positive number")
+			return
+		}
+		limit = n
+	}
+
+	charts, err := s.catalog.Charts(r.Context(), types, strings.TrimSpace(q.Get("genre")), limit)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "unknown chart type") {
+			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, charts)
+}
+
+// handleBrowse returns Apple's editorial "Browse" rows. The upstream shape is
+// undocumented and fragile, so a parse that finds nothing is a 200 with an
+// empty list, not an error — clients hide the section in that case.
+func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.catalog.Groupings(r.Context())
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	if groups == nil {
+		groups = []catalog.EditorialGroup{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}

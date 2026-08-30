@@ -222,7 +222,10 @@ func (c *Client) Album(ctx context.Context, id string) (*Album, error) {
 	if err != nil {
 		return nil, err
 	}
-	q := url.Values{"include": {"tracks"}}
+	q := url.Values{
+		"include":        {"tracks"},
+		"include[songs]": {"artists,albums"},
+	}
 
 	var out struct {
 		Data []rawAlbum `json:"data"`
@@ -243,7 +246,11 @@ func (c *Client) Artist(ctx context.Context, id string) (*Artist, error) {
 	if err != nil {
 		return nil, err
 	}
-	q := url.Values{"views": {"full-albums"}}
+	q := url.Values{
+		"views": {"top-songs,latest-release,full-albums,singles," +
+			"compilation-albums,appears-on-albums,similar-artists,artist-playlists"},
+		"extend": {"artistBio,bornOrFormed,origin"},
+	}
 
 	var out struct {
 		Data []rawArtist `json:"data"`
@@ -265,7 +272,10 @@ func (c *Client) Playlist(ctx context.Context, id string) (*Playlist, error) {
 	if err != nil {
 		return nil, err
 	}
-	q := url.Values{"include": {"tracks"}}
+	q := url.Values{
+		"include":        {"tracks"},
+		"include[songs]": {"artists,albums"},
+	}
 
 	var out struct {
 		Data []rawPlaylist `json:"data"`
@@ -278,13 +288,16 @@ func (c *Client) Playlist(ctx context.Context, id string) (*Playlist, error) {
 	}
 	p := convPlaylist(out.Data[0])
 
+	// Apple's "next" link carries the original query forward, but re-assert
+	// include[songs] so every page's tracks keep their artist/album ids.
+	pageQ := url.Values{"include[songs]": {"artists,albums"}}
 	next := out.Data[0].Relationships.Tracks.Next
 	for next != "" {
 		var page struct {
 			Data []rawSong `json:"data"`
 			Next string    `json:"next"`
 		}
-		if err := c.get(ctx, next, nil, &page); err != nil {
+		if err := c.get(ctx, next, pageQ, &page); err != nil {
 			// Partial results beat failing the whole request.
 			break
 		}
@@ -318,6 +331,120 @@ func (c *Client) Song(ctx context.Context, id string) (*Song, error) {
 	}
 	s := convSong(out.Data[0])
 	return &s, nil
+}
+
+// ChartTypes are the resource types Charts understands.
+var ChartTypes = []string{"songs", "albums", "playlists"}
+
+// Charts returns Apple's catalog top charts. types defaults to all of
+// ChartTypes; genre is an optional Apple genre id to scope the charts to;
+// limit is clamped to Apple's per-chart maximum.
+func (c *Client) Charts(ctx context.Context, types []string, genre string, limit int) (*Charts, error) {
+	if len(types) == 0 {
+		types = ChartTypes
+	}
+	for _, t := range types {
+		if !containsStr(ChartTypes, t) {
+			return nil, fmt.Errorf("unknown chart type %q", t)
+		}
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	sf, err := c.Storefront(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	q := url.Values{}
+	q.Set("types", strings.Join(types, ","))
+	q.Set("limit", strconv.Itoa(limit))
+	if genre != "" {
+		q.Set("genre", genre)
+	}
+
+	var raw rawChartResponse
+	if err := c.get(ctx, "/v1/catalog/"+sf+"/charts", q, &raw); err != nil {
+		return nil, err
+	}
+
+	out := &Charts{}
+	for _, tbl := range raw.Results.Songs {
+		for _, s := range tbl.Data {
+			out.Songs = append(out.Songs, convSong(s))
+		}
+	}
+	for _, tbl := range raw.Results.Albums {
+		for _, a := range tbl.Data {
+			out.Albums = append(out.Albums, convAlbum(a))
+		}
+	}
+	for _, tbl := range raw.Results.Playlists {
+		for _, p := range tbl.Data {
+			out.Playlists = append(out.Playlists, convPlaylist(p))
+		}
+	}
+	return out, nil
+}
+
+// Groupings returns Apple's editorial "Browse" content as flat, titled rows.
+// This reads an amp-api-only endpoint whose shape is undocumented and
+// storefront-dependent, so a response it cannot parse yields no groups
+// rather than an error — the caller treats an empty result as "nothing to
+// show" and the browse UI simply hides.
+func (c *Client) Groupings(ctx context.Context) ([]EditorialGroup, error) {
+	sf, err := c.Storefront(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	q := url.Values{}
+	q.Set("platform", "web")
+	q.Set("name", "music")
+	q.Set("art[url]", "f")
+
+	var raw rawEditorialResponse
+	if err := c.get(ctx, "/v1/editorial/"+sf+"/groupings", q, &raw); err != nil {
+		return nil, err
+	}
+
+	var all []EditorialGroup
+	collectEditorialGroups(raw.Data, &all)
+
+	// The tree also carries single-item hero/promo shelves and untitled
+	// containers; keep only real, titled rows with something to scroll, and
+	// drop rows that are entirely stations (nothing in Orchard's pipeline can
+	// open one).
+	groups := make([]EditorialGroup, 0, len(all))
+	for _, g := range all {
+		if g.Title == "" || len(g.Items) < 4 {
+			continue
+		}
+		openable := false
+		for _, it := range g.Items {
+			if it.Type != "stations" {
+				openable = true
+				break
+			}
+		}
+		if openable {
+			groups = append(groups, g)
+		}
+	}
+	return groups, nil
+}
+
+func containsStr(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Lyrics returns the TTML lyrics document for a song. Not every track has one,

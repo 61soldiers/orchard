@@ -161,7 +161,14 @@ any future package) independently testable and free of the session state machine
 `Client` ([internal/catalog/client.go](internal/catalog/client.go)) talks to
 `amp-api.music.apple.com` as the signed-in account. Surface: `Storefront`, `Search`, `Album`,
 `Artist`, `Playlist` (pages through `relationships.tracks.next` itself), `Song`, `Lyrics`,
-`Recommendations`, `RecentlyPlayed`.
+`Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`.
+
+`Artist` requests Apple's discography `views` (top-songs, singles, similar-artists, …) and
+`extend=artistBio,bornOrFormed,origin` — search still returns only id/name/artwork.
+`Album`/`Playlist` request `include[songs]=artists,albums` so nested tracks keep their
+`artistId`/`albumId`. `Groupings` reads the undocumented `/v1/editorial/{sf}/groupings` tree
+and flattens it to titled rows via `collectEditorialGroups` — amp-api-only and best-effort
+(parse failure ⇒ empty, never an error). See [docs/reference.md](docs/reference.md#known-fragility).
 
 **Two independent throttles, don't conflate them**: `maxConcurrent = 8` (a semaphore — how many
 requests may be in flight at once) and `Config.RateLimit`/`RateBurst` (a token bucket — how fast

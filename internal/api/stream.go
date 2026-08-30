@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -96,13 +95,20 @@ func (s *Server) handleSongStream(w http.ResponseWriter, r *http.Request) {
 // only a few MB — so any failure is reported cleanly before a response is
 // committed.
 //
-// It deliberately behaves exactly like the FairPlay /stream above: a plain
-// 200 with the whole body, Accept-Ranges: none, and the same bytes=0- Range
-// allowance. There is no cache here, so honouring a genuine seek would
-// re-fetch and re-decrypt the entire track for every probe — and libmpv
-// probes hard the moment it sees Accept-Ranges: bytes (opens, reads a little,
-// closes, reopens with a Range), which stalls playback entirely. Downloaded
-// copies are the seekable option.
+// It deliberately behaves like the FairPlay /stream above: a plain 200 with
+// the whole body, Accept-Ranges: none, and the same bytes=0- Range allowance.
+// There is no cache here, so honouring a genuine seek would re-fetch and
+// re-decrypt the entire track for every probe — and libmpv probes hard the
+// moment it sees Accept-Ranges: bytes, which stalls playback entirely.
+// Downloaded copies are the seekable option.
+//
+// Resolving the asset (web-playback lookup + license exchange + CDN download)
+// takes a few seconds against Apple, and a media player abandons an open()
+// that produces no response headers for ~5s. So the 200 and its headers are
+// flushed to the client first — the open then succeeds and the player waits
+// on the body under its far more lenient read timeout — and only then does
+// PrepareAAC run. A failure after that point can only be logged and the
+// connection dropped, exactly as the FairPlay stream above already accepts.
 func (s *Server) streamAAC(w http.ResponseWriter, r *http.Request, id string) {
 	if rng := r.Header.Get("Range"); rng != "" && !isWholeBodyRange(rng) {
 		w.Header().Set("Accept-Ranges", "none")
@@ -116,27 +122,28 @@ func (s *Server) streamAAC(w http.ResponseWriter, r *http.Request, id string) {
 		s.streamError(w, r, err)
 		return
 	}
-	data, err := s.webplayback.OpenAAC(r.Context(), id, dev, mut)
-	if err != nil {
-		if errors.Is(err, r.Context().Err()) {
-			return
-		}
-		if errors.Is(err, webplayback.ErrNoAsset) {
-			writeError(w, http.StatusNotFound, "no_variant",
-				"this track has no streamable asset")
-			return
-		}
-		writeInternalError(w, r, err)
-		return
-	}
 
 	w.Header().Set("Content-Type", "audio/mp4")
 	w.Header().Set("Accept-Ranges", "none")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Orchard-Codec", "aac")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	asset, keys, err := s.webplayback.PrepareAAC(r.Context(), id, dev, mut)
+	if err != nil {
+		if !errors.Is(err, r.Context().Err()) {
+			writeInternalError(nopWriter{}, r, err)
+		}
+		return
+	}
+	if err := webplayback.DecryptAAC(asset, keys, w); err != nil {
+		if !errors.Is(err, r.Context().Err()) {
+			writeInternalError(nopWriter{}, r, err)
+		}
+	}
 }
 
 // isWholeBodyRange reports whether rng is functionally identical to no Range

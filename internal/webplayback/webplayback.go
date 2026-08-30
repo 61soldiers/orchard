@@ -31,6 +31,8 @@ import (
 	widevine "github.com/iyear/gowidevine"
 	wvpb "github.com/iyear/gowidevine/widevinepb"
 	"google.golang.org/protobuf/proto"
+
+	"orchard/internal/retry"
 )
 
 const (
@@ -64,92 +66,141 @@ func New() *Client {
 	}
 }
 
-// OpenAAC fetches and decrypts the track's AAC-256 asset entirely into
-// memory and returns it (a complete, decrypted fragmented MP4). The asset is
-// small — a few MB at 256 kbps — so buffering it is cheap, and it means the
-// /stream handler can report any failure before it has committed a response.
-func (c *Client) OpenAAC(ctx context.Context, adamID, devToken, musicToken string) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := c.FetchAAC(ctx, adamID, devToken, musicToken, &buf); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// FetchAAC downloads the track's Widevine-protected AAC-256 asset and writes
-// the decrypted (still fragmented) MP4 to w. devToken and musicToken are the
-// developer and media-user tokens (apple.Account's DevToken / MusicToken).
-func (c *Client) FetchAAC(ctx context.Context, adamID, devToken, musicToken string, w io.Writer) error {
+// PrepareAAC resolves and downloads the still-encrypted AAC-256 asset for a
+// track, plus its content keys. Everything that can fail — the web-playback
+// lookup, the license exchange, the CDN download — and every retry happens
+// here, so a caller (the /stream handler) can commit an HTTP 200 the moment
+// this returns cleanly and never time a client out mid-decrypt.
+func (c *Client) PrepareAAC(ctx context.Context, adamID, devToken, musicToken string) (asset []byte, keys []*widevine.Key, err error) {
 	assetURL, err := c.assetURL(ctx, adamID, devToken, musicToken)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	fileURL, keyURI, err := c.resolvePlaylist(ctx, assetURL, devToken, musicToken)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	kid, err := kidFromKeyURI(keyURI)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	psshBox, err := buildPSSH(kid)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	dev, err := device()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	pssh, err := widevine.NewPSSH(psshBox)
 	if err != nil {
-		return fmt.Errorf("parse pssh: %w", err)
+		return nil, nil, fmt.Errorf("parse pssh: %w", err)
 	}
 	cdm := widevine.NewCDM(dev)
 	challenge, parseLicense, err := cdm.GetLicenseChallenge(pssh, wvpb.LicenseType_STREAMING, false)
 	if err != nil {
-		return fmt.Errorf("build license challenge: %w", err)
+		return nil, nil, fmt.Errorf("build license challenge: %w", err)
 	}
 
 	licenseBytes, err := c.acquireLicense(ctx, adamID, keyURI, challenge, devToken, musicToken)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	keys, err := parseLicense(licenseBytes)
+	keys, err = parseLicense(licenseBytes)
 	if err != nil {
-		return fmt.Errorf("parse license: %w", err)
+		return nil, nil, fmt.Errorf("parse license: %w", err)
 	}
 
-	asset, err := c.getBytes(ctx, fileURL, devToken, musicToken)
+	asset, err = c.getBytes(ctx, fileURL, devToken, musicToken)
 	if err != nil {
-		return fmt.Errorf("download asset: %w", err)
+		return nil, nil, fmt.Errorf("download asset: %w", err)
 	}
+	return asset, keys, nil
+}
+
+// DecryptAAC writes the decrypted (still fragmented) MP4 for a PrepareAAC
+// result to w. It is pure CPU over an in-memory buffer — no network — so it
+// runs after a 200 has been committed.
+func DecryptAAC(asset []byte, keys []*widevine.Key, w io.Writer) error {
 	if err := widevine.DecryptMP4Auto(bytes.NewReader(asset), keys, w); err != nil {
 		return fmt.Errorf("decrypt asset: %w", err)
 	}
 	return nil
 }
 
+// FetchAAC resolves, downloads and decrypts a track's AAC-256 asset, writing
+// the decrypted fragmented MP4 to w. Used by the download pipeline.
+func (c *Client) FetchAAC(ctx context.Context, adamID, devToken, musicToken string, w io.Writer) error {
+	asset, keys, err := c.PrepareAAC(ctx, adamID, devToken, musicToken)
+	if err != nil {
+		return err
+	}
+	return DecryptAAC(asset, keys, w)
+}
+
+// httpErr is a non-200 from one of Apple's playback endpoints. It carries the
+// status so isTransient can tell a retryable blip from a permanent refusal.
+type httpErr struct {
+	what string
+	code int
+}
+
+func (e *httpErr) Error() string { return fmt.Sprintf("%s: apple returned %d", e.what, e.code) }
+
+// isTransient reports whether an error is worth another attempt: a transport
+// failure, a 429, or a 5xx. A well-formed 4xx (or a cancelled context) is not.
+func isTransient(err error) bool {
+	var he *httpErr
+	if errors.As(err, &he) {
+		return he.code == http.StatusTooManyRequests || he.code >= 500
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return true
+}
+
+// send runs build() — which must produce a fresh request each call — with
+// retry/backoff on transient failures and returns the response body.
+func (c *Client) send(ctx context.Context, what string, build func() (*http.Request, error)) ([]byte, error) {
+	var out []byte
+	err := retry.Do(ctx, retry.Default(), isTransient, func() error {
+		req, err := build()
+		if err != nil {
+			return err
+		}
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return &httpErr{what: what, code: resp.StatusCode}
+		}
+		out, err = io.ReadAll(resp.Body)
+		return err
+	})
+	return out, err
+}
+
 // assetURL runs the web-playback request and returns the AAC-256 asset's
 // playlist URL.
 func (c *Client) assetURL(ctx context.Context, adamID, devToken, musicToken string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"salableAdamId": adamID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webPlaybackURL, bytes.NewReader(body))
+	raw, err := c.send(ctx, "web-playback request", func() (*http.Request, error) {
+		body, _ := json.Marshal(map[string]string{"salableAdamId": adamID})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, webPlaybackURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		c.setPlaybackHeaders(req, devToken, musicToken)
+		return req, nil
+	})
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	c.setPlaybackHeaders(req, devToken, musicToken)
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("web-playback request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("web-playback request: apple returned %s", resp.Status)
 	}
 
 	var out struct {
@@ -160,7 +211,7 @@ func (c *Client) assetURL(ctx context.Context, adamID, devToken, musicToken stri
 			} `json:"assets"`
 		} `json:"songList"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return "", fmt.Errorf("decode web-playback response: %w", err)
 	}
 	if len(out.SongList) == 0 {
@@ -201,33 +252,33 @@ func (c *Client) resolvePlaylist(ctx context.Context, playlistURL, devToken, mus
 // acquireLicense POSTs the Widevine challenge in Apple's envelope and returns
 // the raw license bytes.
 func (c *Client) acquireLicense(ctx context.Context, adamID, keyURI string, challenge []byte, devToken, musicToken string) ([]byte, error) {
-	body, _ := json.Marshal(map[string]any{
-		"challenge":      base64.StdEncoding.EncodeToString(challenge),
-		"key-system":     "com.widevine.alpha",
-		"uri":            keyURI,
-		"adamId":         adamID,
-		"isLibrary":      false,
-		"user-initiated": true,
+	raw, err := c.send(ctx, "license request", func() (*http.Request, error) {
+		body, _ := json.Marshal(map[string]any{
+			"challenge":      base64.StdEncoding.EncodeToString(challenge),
+			"key-system":     "com.widevine.alpha",
+			"uri":            keyURI,
+			"adamId":         adamID,
+			"isLibrary":      false,
+			"user-initiated": true,
+		})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, licenseURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		c.setPlaybackHeaders(req, devToken, musicToken)
+		return req, nil
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, licenseURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	c.setPlaybackHeaders(req, devToken, musicToken)
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("license request: %w", err)
-	}
-	defer resp.Body.Close()
 
 	var out struct {
 		License   string `json:"license"`
 		ErrorCode int    `json:"errorCode"`
 		Status    int    `json:"status"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode license response: %w", err)
 	}
 	if out.ErrorCode != 0 || out.Status != 0 {
@@ -250,20 +301,14 @@ func (c *Client) setPlaybackHeaders(req *http.Request, devToken, musicToken stri
 }
 
 func (c *Client) getBytes(ctx context.Context, url, devToken, musicToken string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	c.setPlaybackHeaders(req, devToken, musicToken)
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("apple returned %s", resp.Status)
-	}
-	return io.ReadAll(resp.Body)
+	return c.send(ctx, "fetch "+url, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.setPlaybackHeaders(req, devToken, musicToken)
+		return req, nil
+	})
 }
 
 // kidFromKeyURI pulls the raw key id out of an EXT-X-KEY URI of the form

@@ -78,8 +78,9 @@ type Client struct {
 	cfg Config
 	hc  *http.Client
 
-	mu      sync.Mutex
-	masters map[string]masterEntry
+	mu         sync.Mutex
+	masters    map[string]masterEntry
+	noFairPlay map[string]time.Time // adamID -> when the ErrNoFairPlayAsset verdict expires
 }
 
 // New returns a Client.
@@ -88,8 +89,9 @@ func New(cfg Config) *Client {
 		cfg.Host = "127.0.0.1"
 	}
 	return &Client{
-		cfg:     cfg,
-		masters: map[string]masterEntry{},
+		cfg:        cfg,
+		masters:    map[string]masterEntry{},
+		noFairPlay: map[string]time.Time{},
 		// No overall timeout: a track download is a long streaming read.
 		hc: &http.Client{Transport: &http.Transport{
 			ResponseHeaderTimeout: 60 * time.Second,
@@ -134,6 +136,10 @@ func (c *Client) masterURL(ctx context.Context, adamID string) (string, error) {
 		c.mu.Unlock()
 		return u, nil
 	}
+	if exp, ok := c.noFairPlay[adamID]; ok && time.Now().Before(exp) {
+		c.mu.Unlock()
+		return "", ErrNoFairPlayAsset
+	}
 	c.mu.Unlock()
 
 	addr := net.JoinHostPort(c.cfg.Host, strconv.Itoa(c.cfg.M3U8Port))
@@ -163,9 +169,14 @@ func (c *Client) masterURL(ctx context.Context, adamID string) (string, error) {
 	// A track Apple never re-encoded for streaming resolves instead to a
 	// single-file legacy-DRM asset (mzaf_*.m4p on streamingaudio.itunes.apple.com),
 	// which parseMaster would later reduce to zero variants and an opaque "no
-	// rendition" error. Fail here with a specific error, and don't cache it —
-	// a re-request could succeed if the catalog is updated.
+	// rendition" error. Fail with a specific error, and cache the verdict for
+	// masterTTL: the daemon round trip that reaches it is ~2-3s, and both
+	// /stream and download.Manager fall straight through to the Widevine AAC
+	// path on it, so paying it once per track (not once per play) matters.
 	if !strings.Contains(u, ".m3u8") {
+		c.mu.Lock()
+		c.noFairPlay[adamID] = time.Now().Add(masterTTL)
+		c.mu.Unlock()
 		return "", ErrNoFairPlayAsset
 	}
 

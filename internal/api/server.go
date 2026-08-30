@@ -88,6 +88,9 @@ func (s *Server) routes() chi.Router {
 		r.Get("/songs/{id}/variants", s.handleSongVariants)
 		r.Get("/songs/{id}/stream", s.handleSongStream)
 
+		r.Get("/charts", s.handleCharts)
+		r.Get("/browse", s.handleBrowse)
+
 		r.Get("/me/recommendations", s.handleRecommendations)
 		r.Get("/me/recent/played", s.handleRecentlyPlayed)
 

@@ -134,14 +134,34 @@ Read `state` from the body rather than relying on the HTTP status: `login` retur
 GET /v1/storefront                  -> {storefront}
 GET /v1/search?term=&types=&limit=  -> {songs,albums,artists,playlists}
 GET /v1/albums/{id}                 -> album with full track list
-GET /v1/artists/{id}                -> artist with albums
+GET /v1/artists/{id}                -> artist with bio, images and discography views
 GET /v1/playlists/{id}              -> playlist with all tracks (paged transparently)
 GET /v1/songs/{id}                  -> single song
 GET /v1/songs/{id}/lyrics           -> {songId, format:"ttml", ttml, lrc, syncLevel}
+GET /v1/charts?types=&genre=&limit= -> {songs,albums,playlists}
+GET /v1/browse                      -> {groups:[{id,title,items:[...]}]}
 ```
 
 `types` is a comma-separated subset of `songs,albums,artists,playlists` and defaults to all four.
 `limit` defaults to 25 and is clamped to Apple's maximum of 25.
+
+`/v1/artists/{id}` returns the artist's editorial `notes` (biography), `origin`, `bornOrFormed`
+and `artwork`, plus discography lists pulled from Apple's artist "views":
+`albums` (full albums), `singles`, `compilations`, `appearsOn`, `topSongs`, `similarArtists`
+(each a full artist object, minus its own nested views), `artistPlaylists`, and
+`latestRelease`. Any list Apple omits for that artist is simply absent. Search still returns
+the minimal artist shape (id/name/artwork only).
+
+`/v1/charts` is Apple's catalog top charts, split by resource type; `types` is a subset of
+`songs,albums,playlists`, `genre` is an optional Apple genre id, `limit` defaults to 20 and is
+capped at 50.
+
+`/v1/browse` is Apple's editorial "Browse" content — "Best New Songs", "New This Week",
+"Recent Releases", "Daily Top 100", "City Charts" and so on — flattened into titled rows whose
+`items` use the same minimal mixed-type shape as personalization (fetch the full resource by
+`id`/`type`). Untitled single-item promo shelves and station-only rows are dropped. This reads
+an **undocumented amp-api endpoint**; a response Orchard cannot parse returns `{"groups":[]}`
+(HTTP 200), and clients hide the section — see [Known fragility](#known-fragility).
 
 The storefront comes from the signed-in account, so results match that region. Responses are
 Orchard's own shapes, not Apple's — the client normalises them so the API stays stable if Apple
@@ -155,6 +175,11 @@ Every item carries a `quality` object derived from Apple's `audioTraits`:
 
 `artwork.url` is Apple's template containing `{w}` and `{h}`; `artwork.thumbUrl` is the same image
 already resolved to 600×600 for clients that just want to render something.
+
+Every song — a standalone `/v1/songs/{id}`, an album's tracks, or a playlist's tracks — carries
+`artistId` and `albumId` (Apple's `include[songs]=artists,albums` is requested on the album and
+playlist calls so the nested tracks keep them), so a client can link a track row straight to its
+artist or album without a second lookup.
 
 `/v1/songs/{id}/lyrics` converts Apple's TTML to LRC server-side, so a client never has to parse
 TTML itself. Apple declares the sync tier directly on the TTML root (`itunes:timing="Word" |
@@ -395,3 +420,10 @@ The daemon hooks a hardcoded address (`libCoreLSKD+0x1d5709`) inside Apple's lib
 whenever Apple ships a new Music APK. If things start failing after an upstream release, pin a
 known-good build with `ORCHARD_WRAPPER_TAG` and `ORCHARD_WRAPPER_SHA256`, and treat upgrades as a
 manual, tested step.
+
+`/v1/browse` reads the internal `amp-api` web-player surface rather than the documented Apple
+Music API — the `/v1/editorial/{sf}/groupings` tree is not part of the public contract. It is
+best-effort: a shape Orchard cannot parse yields `{"groups":[]}`, never a hard error, so a
+client that treats "missing" as "not available" degrades cleanly if Apple changes it. The rest
+of the catalog (`/v1/albums`, `/v1/artists`, `/v1/charts`, search, lyrics) uses documented
+endpoints and is not exposed to this risk.
