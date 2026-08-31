@@ -6,9 +6,10 @@ You need a paid Apple Music subscription. Orchard signs in as you and does the w
 
 ## What you need
 
-- A 64-bit Intel, AMD or ARM computer running **Linux or Windows**.
+- A 64-bit Intel, AMD or ARM computer running **Linux, macOS or Windows**.
 - **Docker**:
   - Linux — Docker Engine with the Compose plugin. [Install guide](https://docs.docker.com/engine/install/)
+  - macOS — [Docker Desktop](https://www.docker.com/products/docker-desktop/), running (nothing to configure).
   - Windows — [Docker Desktop](https://www.docker.com/products/docker-desktop/) with its default
     **WSL2 backend** and **Linux containers** (both are on out of the box).
 - Your **Apple ID** and password, for the account with the subscription.
@@ -17,7 +18,7 @@ You need a paid Apple Music subscription. Orchard signs in as you and does the w
 
 Open a terminal in the folder where you want Orchard, then:
 
-**Linux**
+**Linux / macOS**
 
 ```shell
 git clone https://github.com/evolvedmesh/orchard.git
@@ -71,17 +72,18 @@ repeat and fixes most problems.
 Start Docker. If it is already running, give yourself permission, then log out and back in:
 `sudo usermod -aG docker $USER`
 
-**"Docker Desktop is not running" / "is in Windows-containers mode"** (Windows)
-Start Docker Desktop and wait for the whale icon to stop animating. If setup reports
+**"Docker Desktop is not running"** (macOS / Windows)
+Start Docker Desktop and wait for the whale icon to stop animating. On Windows, if setup reports
 Windows-containers mode, right-click the tray icon and choose "Switch to Linux containers...".
 
 **"Unprivileged user namespaces are disabled"** (Linux)
 Your system blocks something Orchard needs. On Ubuntu 24.04 and later:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
 
-**"The Apple Music component did not finish installing"** (Windows)
-Almost always the WSL2 backend being off. In Docker Desktop → Settings → General, tick
-"Use the WSL 2 based engine", apply, and run `.\setup.ps1` again.
+**"The Apple Music component did not finish installing"** (macOS / Windows)
+On Windows this is almost always the WSL2 backend being off — Docker Desktop → Settings → General,
+tick "Use the WSL 2 based engine", apply, and run the setup script again. On macOS, give Docker
+Desktop more memory (Settings → Resources) and retry; check `docker compose logs` either way.
 
 **"Sign-in failed: Apple rejected the credentials"**
 Check the email and password. Use your normal Apple ID password, not an app-specific one. If you

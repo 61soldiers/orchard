@@ -43,18 +43,32 @@ echo
 bold "Orchard setup"
 echo
 
+OS=$(uname -s)
+
 command -v curl >/dev/null 2>&1 || die "curl is not installed. Install it and run this again."
-command -v docker >/dev/null 2>&1 || die "Docker is not installed. See https://docs.docker.com/engine/install/"
+command -v docker >/dev/null 2>&1 || die "Docker is not installed. See https://docs.docker.com/get-docker/"
 docker compose version >/dev/null 2>&1 || die "The Docker Compose plugin is missing. See https://docs.docker.com/compose/install/"
-docker info >/dev/null 2>&1 || die "Docker is not running, or your user cannot reach it. Try: sudo usermod -aG docker \$USER, then log out and back in."
+
+if ! docker info >/dev/null 2>&1; then
+	case "$OS" in
+	Darwin) die "Docker Desktop is not running. Open it from Applications, wait for the menu-bar whale to stop animating, then run this again." ;;
+	*) die "Docker is not running, or your user cannot reach it. Try: sudo usermod -aG docker \$USER, then log out and back in." ;;
+	esac
+fi
 
 case "$(uname -m)" in
 x86_64 | aarch64 | arm64) ;;
 *) die "Orchard needs a 64-bit Intel/AMD or ARM machine. Yours reports $(uname -m)." ;;
 esac
 
-ns=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)
-[ "$ns" -gt 0 ] 2>/dev/null || die "Unprivileged user namespaces are disabled on this machine, and the Apple Music daemon needs them. Ask your administrator to enable user.max_user_namespaces."
+# The daemon needs unprivileged user namespaces. On Linux that is a host-kernel
+# setting we can read now; on macOS the daemon runs inside Docker Desktop's Linux
+# VM, which ships with them on — a real problem there surfaces below when the
+# component install never reaches "ready".
+if [ "$OS" = "Linux" ]; then
+	ns=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)
+	[ "$ns" -gt 0 ] 2>/dev/null || die "Unprivileged user namespaces are disabled on this machine, and the Apple Music daemon needs them. Ask your administrator to enable user.max_user_namespaces."
+fi
 
 ok "System looks good"
 
@@ -69,12 +83,17 @@ if ! grep -q '^ORCHARD_API_KEY=.\{24,\}' "$ENV_FILE"; then
 	else
 		generated=$(head -c 48 /dev/urandom | base64 | tr -d '=+/\n')
 	fi
-	# Replace the placeholder if present, otherwise append.
-	if grep -q '^ORCHARD_API_KEY=' "$ENV_FILE"; then
-		sed -i "s|^ORCHARD_API_KEY=.*|ORCHARD_API_KEY=$generated|" "$ENV_FILE"
-	else
-		printf 'ORCHARD_API_KEY=%s\n' "$generated" >>"$ENV_FILE"
-	fi
+	# Rewrite in place without `sed -i` — its syntax differs on macOS/BSD.
+	# Replace the key line if present, otherwise append it.
+	tmp=$(mktemp)
+	awk -v repl="ORCHARD_API_KEY=$generated" '
+		/^ORCHARD_API_KEY=/ { print repl; done = 1; next }
+		{ print }
+		END { if (!done) print repl }
+	' "$ENV_FILE" >"$tmp" && mv "$tmp" "$ENV_FILE" || {
+		rm -f "$tmp"
+		die "Could not write the access key to $ENV_FILE"
+	}
 	ok "Generated an access key and saved it to $ENV_FILE"
 fi
 
@@ -82,7 +101,7 @@ KEY=$(grep '^ORCHARD_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
 [ -n "$KEY" ] || die "Could not read ORCHARD_API_KEY from $ENV_FILE"
 
 # ------------------------------------------------------------------- server --
-info "Starting the server (the first run builds it, which can take a minute)..."
+info "Starting the server (the first run builds it, which can take a few minutes)..."
 docker compose up -d >/dev/null 2>&1 || die "Docker failed to start Orchard. Run 'docker compose up' to see why."
 
 for _ in $(seq 1 60); do
@@ -106,7 +125,7 @@ for _ in $(seq 1 100); do
 	sleep 3
 done
 [ "$(wrapper_state "$status")" = "ready" ] ||
-	die "The Apple Music component did not finish installing. Run 'docker compose logs' to see why."
+	die "The Apple Music component did not finish installing. Run 'docker compose logs' to see why. On macOS and Windows, check that Docker Desktop is on its Linux engine (the default) and has enough memory allotted in Settings."
 ok "Apple Music component installed"
 
 # -------------------------------------------------------------------- login --

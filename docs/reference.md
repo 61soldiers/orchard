@@ -28,11 +28,14 @@ that daemon and puts a REST API in front of it, together with the download pipel
 
 The daemon is Linux-only and architecture-specific, which is where the hardware requirements come
 from. Orchard fetches the release matching the host CPU on first start and verifies it against the
-SHA-256 digest GitHub publishes for the asset. The host OS can still be Windows: under Docker
-Desktop's WSL2 backend the container is ordinary Linux `amd64`, and the WSL2 kernel ships with
-unprivileged user namespaces enabled, so no host-side tuning (below) is needed. `setup.ps1` is the
-PowerShell equivalent of `setup.sh` for that path. A non-WSL2 Docker backend, or Windows-container
-mode, cannot run the daemon.
+SHA-256 digest GitHub publishes for the asset.
+
+The host OS can be Linux, macOS or Windows. On macOS and Windows the container is ordinary Linux
+(`amd64`, or `arm64` on Apple Silicon) inside Docker Desktop's VM — LinuxKit on macOS, WSL2 on
+Windows — both of which ship with unprivileged user namespaces enabled, so none of the host-side
+tuning below is needed. `setup.sh` runs on Linux and macOS; `setup.ps1` is the PowerShell port for
+Windows. A non-WSL2 Docker backend, or Windows-container mode, cannot run the daemon. macOS support
+is newer than the Linux path and less exercised.
 
 ### Sign-in flow
 

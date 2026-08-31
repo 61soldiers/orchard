@@ -22,11 +22,13 @@ When changing a response shape here, that file needs the matching update.
 - Not a git repository (no `.git`) — there is no commit history to consult; this file and
   [docs/reference.md](docs/reference.md) are the record of *why*, not `git log`.
 - Single-tenant: one API key, one Apple session, no user accounts. Every DB row is unscoped.
-- The daemon is Linux `amd64`/`arm64` only — no build for anything else. The *host* can be Linux
-  or Windows: on Windows it runs unchanged inside Docker Desktop's WSL2 VM (a real Linux amd64
-  kernel with unprivileged user namespaces on by default), driven by `setup.ps1` instead of
-  `setup.sh`. macOS is untested. Anything outside a Linux container (Windows containers, a non-WSL2
-  Docker backend) cannot work — the daemon needs `unshare(CLONE_NEWUSER|NEWNS|NEWPID)`.
+- The daemon is Linux `amd64`/`arm64` only — no build for anything else. The *host* can be Linux,
+  macOS or Windows: on macOS and Windows the daemon runs unchanged inside Docker Desktop's Linux
+  VM (WSL2 on Windows, LinuxKit on macOS — both ship with unprivileged user namespaces on).
+  `setup.sh` covers Linux and macOS (it branches on `uname -s` — skips the host `/proc` userns
+  check on Darwin, avoids `sed -i`); `setup.ps1` is the Windows/PowerShell port. Anything outside
+  a Linux container (Windows containers, a non-WSL2 Docker backend) cannot work — the daemon needs
+  `unshare(CLONE_NEWUSER|NEWNS|NEWPID)`. macOS is newer and less battle-tested than Linux.
 
 ---
 
@@ -63,8 +65,10 @@ docker compose logs -f orchard          # tail structured JSON logs (set ORCHARD
                                          # in .env to see the daemon's own stderr, tagged "wrapper")
 ./setup.sh                              # interactive: start the stack, wait for the daemon to
                                          # install, walk through Apple sign-in + 2FA. Idempotent.
-# setup.ps1 is the byte-for-byte-equivalent Windows/PowerShell port of setup.sh — keep the two
-# in sync when the setup flow or the /v1/apple/* state names change.
+                                         # POSIX-portable — runs on Linux and macOS (branches on
+                                         # `uname -s`, no `sed -i`, no bash 4+ features).
+# setup.ps1 is the equivalent Windows/PowerShell port of setup.sh — keep all three flows in sync
+# when the setup steps or the /v1/apple/* state names change.
 ```
 
 There are no `_test.go` files anywhere in the tree. Verify a change by building, running (`go run`
