@@ -6,13 +6,18 @@ You need a paid Apple Music subscription. Orchard signs in as you and does the w
 
 ## What you need
 
-- 64-bit Intel, AMD or ARM processor **Linux computer**
-- **Docker**, with Compose. [Install guide](https://docs.docker.com/engine/install/)
+- A 64-bit Intel, AMD or ARM computer running **Linux or Windows**.
+- **Docker**:
+  - Linux — Docker Engine with the Compose plugin. [Install guide](https://docs.docker.com/engine/install/)
+  - Windows — [Docker Desktop](https://www.docker.com/products/docker-desktop/) with its default
+    **WSL2 backend** and **Linux containers** (both are on out of the box).
 - Your **Apple ID** and password, for the account with the subscription.
 
 ## Setup
 
-Open a terminal and run these three commands.
+Open a terminal in the folder where you want Orchard, then:
+
+**Linux**
 
 ```shell
 git clone https://github.com/evolvedmesh/orchard.git
@@ -20,8 +25,17 @@ cd orchard
 ./setup.sh
 ```
 
-`setup.sh` does everything else: it checks your machine, starts Orchard, downloads the Apple Music
-component ([wrapper](https://github.com/WorldObservationLog/wrapper)), and signs you in.
+**Windows** (PowerShell)
+
+```powershell
+git clone https://github.com/evolvedmesh/orchard.git
+cd orchard
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+The setup script does everything else: it checks your machine, starts Orchard, downloads the Apple
+Music component ([wrapper](https://github.com/WorldObservationLog/wrapper)), and signs you in.
+`setup.sh` and `setup.ps1` are the same flow — pick the one for your platform.
 
 It asks two (perhaps three) questions:
 
@@ -50,15 +64,24 @@ password again (until it expires or Apple requires re-authentication, in which c
 
 ## If something goes wrong
 
-**Run `./setup.sh` again first.** It is safe to repeat and fixes most problems.
+**Run the setup script again first** (`./setup.sh`, or `.\setup.ps1` on Windows). It is safe to
+repeat and fixes most problems.
 
-**"Docker is not running, or your user cannot reach it"**
+**"Docker is not running, or your user cannot reach it"** (Linux)
 Start Docker. If it is already running, give yourself permission, then log out and back in:
 `sudo usermod -aG docker $USER`
 
-**"Unprivileged user namespaces are disabled"**
+**"Docker Desktop is not running" / "is in Windows-containers mode"** (Windows)
+Start Docker Desktop and wait for the whale icon to stop animating. If setup reports
+Windows-containers mode, right-click the tray icon and choose "Switch to Linux containers...".
+
+**"Unprivileged user namespaces are disabled"** (Linux)
 Your system blocks something Orchard needs. On Ubuntu 24.04 and later:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
+
+**"The Apple Music component did not finish installing"** (Windows)
+Almost always the WSL2 backend being off. In Docker Desktop → Settings → General, tick
+"Use the WSL 2 based engine", apply, and run `.\setup.ps1` again.
 
 **"Sign-in failed: Apple rejected the credentials"**
 Check the email and password. Use your normal Apple ID password, not an app-specific one. If you

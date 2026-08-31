@@ -8,9 +8,6 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orchard ./cmd/orch
 
 FROM debian:bookworm-slim
 
-# ffmpeg remuxes the decrypted fragmented MP4 into a plain .m4a, used by the
-# download pipeline from phase 4 onward. Upstream shells out to MP4Box for this,
-# but Debian no longer packages gpac in either bookworm or trixie.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg \
   && rm -rf /var/lib/apt/lists/*
