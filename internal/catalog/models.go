@@ -532,9 +532,9 @@ func notesText(n *rawNotes) string {
 		return ""
 	}
 	if n.Standard != "" {
-		return n.Standard
+		return htmlToText(n.Standard)
 	}
-	return n.Short
+	return htmlToText(n.Short)
 }
 
 func convSong(r rawSong) Song {
@@ -556,7 +556,7 @@ func convAlbum(r rawAlbum) Album {
 	out := Album{
 		ID: r.ID, Name: a.Name, ArtistName: a.ArtistName, ArtistID: r.Relationships.Artists.first(),
 		TrackCount:  a.TrackCount,
-		ReleaseDate: a.ReleaseDate, RecordLabel: a.RecordLabel, Copyright: a.Copyright,
+		ReleaseDate: a.ReleaseDate, RecordLabel: a.RecordLabel, Copyright: htmlToText(a.Copyright),
 		UPC: a.UPC, Genres: a.GenreNames, ContentRating: a.ContentRating,
 		IsSingle: a.IsSingle, IsCompilation: a.IsCompilation, Notes: notesText(a.EditorialNotes),
 		Quality: convQuality(a.AudioTraits), Artwork: convArtwork(a.Artwork),
@@ -571,7 +571,7 @@ func convAlbum(r rawAlbum) Album {
 
 func convArtist(r rawArtist) Artist {
 	a := r.Attributes
-	notes := a.ArtistBio
+	notes := htmlToText(a.ArtistBio)
 	if notes == "" {
 		notes = notesText(a.EditorialNotes)
 	}

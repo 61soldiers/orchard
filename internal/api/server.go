@@ -94,6 +94,12 @@ func (s *Server) routes() chi.Router {
 		r.Get("/me/recommendations", s.handleRecommendations)
 		r.Get("/me/recent/played", s.handleRecentlyPlayed)
 
+		r.Get("/me/library/playlists", s.handleLibraryPlaylistsMe)
+		r.Get("/me/library/playlists/{id}", s.handleLibraryPlaylistMe)
+		r.Get("/me/library/songs", s.handleLibrarySongsMe)
+		r.Get("/me/library/albums", s.handleLibraryAlbumsMe)
+		r.Get("/me/library/artists", s.handleLibraryArtistsMe)
+
 		r.Post("/downloads", s.handleCreateDownload)
 		r.Get("/downloads", s.handleListDownloads)
 		r.Get("/downloads/{id}", s.handleGetDownload)

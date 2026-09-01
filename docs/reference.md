@@ -159,6 +159,12 @@ and `artwork`, plus discography lists pulled from Apple's artist "views":
 `latestRelease`. Any list Apple omits for that artist is simply absent. Search still returns
 the minimal artist shape (id/name/artwork only).
 
+Every free-text field Apple returns as an HTML fragment — an album/playlist's `notes` and
+`description`, an artist's `notes` (biography), an album's `copyright` — is flattened to plain
+text server-side (`<b>`/`<i>`/`<a>`/`<br>` stripped, `&`-entities decoded; see `htmlToText` in
+[internal/catalog/htmltext.go](internal/catalog/htmltext.go)), so a client renders it directly
+without an HTML parser.
+
 `/v1/charts` is Apple's catalog top charts, split by resource type; `types` is a subset of
 `songs,albums,playlists`, `genre` is an optional Apple genre id, `limit` defaults to 20 and is
 capped at 50.
@@ -254,6 +260,33 @@ Fetch the full resource by `id`/`type` through the catalog endpoints above — `
 song's HLS asset and has no equivalent for Apple's live radio, so a station can be shown but not
 played or downloaded.
 
+### Library
+
+The signed-in account's own added music and personal playlists — distinct from `/v1/library/*`,
+which is Orchard's index of files it has *downloaded*.
+
+```text
+GET /v1/me/library/playlists          -> {playlists:[LibraryPlaylist]}   (no tracks)
+GET /v1/me/library/playlists/{id}     -> LibraryPlaylist with tracks
+GET /v1/me/library/songs              -> {songs:[Song]}
+GET /v1/me/library/albums             -> {albums:[Album]}                 (no tracks)
+GET /v1/me/library/artists            -> {artists:[Artist]}               (name + artwork only)
+```
+
+Apple's library resources have their own id space (`i.*` songs, `l.*` albums, `p.*` playlists)
+that the stream/download pipeline does not accept. Every item here is resolved to its **catalog**
+resource (via `include=catalog`, falling back to `playParams.catalogId`), so the `id` you get
+back is the same one `/v1/songs/{id}`, `/v1/albums/{id}`, `/v1/playlists/{id}` and the
+stream/download routes take. A track with no catalog equivalent (uploaded or matched-only) keeps
+its library id and simply won't stream.
+
+`LibraryPlaylist` adds `canEdit`, `trackCount` and `catalogId` (the catalog playlist id when the
+playlist mirrors one — `hasCatalog`; empty for a purely personal playlist, whose tracks still
+carry their own catalog ids) to the normal playlist shape. Library playlists frequently have no
+`artwork`. Lists are internally paged (100/page, up to ~1200 items) and returned whole — no
+`limit`/`offset`/`next`. Same `apple_not_ready` / `apple_unauthorized` / `apple_error` mapping
+as the rest of the catalog.
+
 ### Streaming
 
 ```text
@@ -288,6 +321,11 @@ native media player.
 Manifest resolution round-trips to Apple and can take up to a minute on a cold cache, so resolved
 manifests are cached for 5 minutes. Streaming itself runs far faster than real time — a 3:50
 lossless track takes a few seconds on a fast connection.
+
+If the connection to Apple's CDN drops part-way through the asset, Orchard reconnects with a
+`Range` request and resumes from where it left off, so a transient blip does not truncate the
+response (which would make a client stop the song early and skip to the next). A failure inside
+the decrypt pipeline is not recoverable this way and still ends the stream.
 
 A small set of older, AAC-only catalog items were never re-encoded for FairPlay streaming: the
 daemon resolves them not to an HLS master playlist but to a single-file asset

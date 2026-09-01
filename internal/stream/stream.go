@@ -405,8 +405,8 @@ func isRetryableFetchErr(err error) bool {
 
 // fetch issues a GET against Apple's CDN, retrying a transient failure before
 // any of the body has been read. Once fetch returns, the caller owns a live
-// stream and further failures are not retried — resuming mid-track is out of
-// scope.
+// stream; for the audio asset, resumableReader takes over and reconnects on a
+// mid-transfer drop.
 func (c *Client) fetch(ctx context.Context, u string) (io.ReadCloser, error) {
 	var body io.ReadCloser
 	err := retry.Do(ctx, retry.Default(), isRetryableFetchErr, func() error {
@@ -466,7 +466,6 @@ func (c *Client) Open(ctx context.Context, adamID string, v Variant, w io.Writer
 	if err != nil {
 		return err
 	}
-	defer body.Close()
 
 	// Total comes from the playlist's byte ranges, which cover the whole asset.
 	var total int64
@@ -475,9 +474,19 @@ func (c *Client) Open(ctx context.Context, adamID string, v Variant, w io.Writer
 			total += int64(seg.Limit)
 		}
 	}
-	var source io.Reader = body
+
+	// Wrap the CDN body so a mid-transfer drop (a network blip against Apple's
+	// edge) is transparently resumed with a Range request rather than
+	// truncating the stream — a truncated stream makes the client play a short
+	// file and skip to the next track before the song is over.
+	resumable := &resumableReader{
+		ctx: ctx, hc: c.hc, url: assetURL, total: total, rc: body,
+	}
+	defer resumable.Close()
+
+	var source io.Reader = resumable
 	if onProgress != nil {
-		source = &countingReader{r: body, total: total, report: onProgress}
+		source = &countingReader{r: source, total: total, report: onProgress}
 	}
 
 	addr := net.JoinHostPort(c.cfg.Host, strconv.Itoa(c.cfg.DecryptPort))
@@ -581,4 +590,123 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		c.report(c.done, c.total)
 	}
 	return n, err
+}
+
+// assetResumeMaxRetries caps how many times a single stream will reconnect to
+// Apple's CDN after a mid-transfer drop before giving up.
+const assetResumeMaxRetries = 4
+
+// resumableReader reads a byte-range CDN asset that may drop mid-transfer. When
+// the underlying body fails (transport error, or EOF before the playlist's
+// declared byte total has been delivered), it re-fetches the same URL with a
+// `Range: bytes=<pos>-` and continues, so the fragment loop in Open never sees
+// the gap. Without this, a brief network blip against Apple's edge silently
+// truncates the stream and the client skips to the next track early.
+//
+// Only asset-read failures are recovered here; a failure inside the daemon's
+// decrypt path is a different, track-specific problem and still ends the stream.
+type resumableReader struct {
+	ctx     context.Context
+	hc      *http.Client
+	url     string
+	total   int64 // expected asset length from the playlist's byte ranges; 0 ⇒ unknown
+	rc      io.ReadCloser
+	pos     int64
+	retries int
+}
+
+func (r *resumableReader) Read(p []byte) (int, error) {
+	for {
+		if r.rc == nil {
+			rc, err := r.fetchFrom(r.pos)
+			if err != nil {
+				if errors.Is(err, errAssetEnd) {
+					return 0, io.EOF
+				}
+				return 0, err
+			}
+			r.rc = rc
+		}
+
+		n, err := r.rc.Read(p)
+		r.pos += int64(n)
+		if n > 0 {
+			// Surface any accompanying error on the next call (io convention).
+			return n, nil
+		}
+		if err == nil {
+			return 0, nil
+		}
+
+		r.rc.Close()
+		r.rc = nil
+		if r.ctx.Err() != nil {
+			return 0, r.ctx.Err()
+		}
+
+		complete := r.total > 0 && r.pos >= r.total
+		if errors.Is(err, io.EOF) && (complete || r.total <= 0) {
+			return 0, io.EOF
+		}
+		if !errors.Is(err, io.EOF) && !isRetryableFetchErr(err) {
+			return 0, err
+		}
+		if r.retries >= assetResumeMaxRetries {
+			return 0, fmt.Errorf("asset stream truncated at byte %d/%d after %d resume attempts: %w",
+				r.pos, r.total, r.retries, err)
+		}
+		r.retries++
+		select {
+		case <-time.After(time.Duration(r.retries) * 250 * time.Millisecond):
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		}
+		// loop: rc is nil, so the top of the loop reconnects from r.pos
+	}
+}
+
+func (r *resumableReader) Close() error {
+	if r.rc != nil {
+		err := r.rc.Close()
+		r.rc = nil
+		return err
+	}
+	return nil
+}
+
+// errAssetEnd is returned internally by fetchFrom when the CDN answers a resume
+// request with 416 — i.e. there is nothing left to read.
+var errAssetEnd = errors.New("asset fully read")
+
+func (r *resumableReader) fetchFrom(offset int64) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, r.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
+	}
+	resp, err := r.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// A 200 to a ranged request means the server ignored Range; accepting
+		// it would replay bytes we already delivered.
+		if offset > 0 {
+			resp.Body.Close()
+			return nil, fmt.Errorf("resume at byte %d: server ignored Range (200)", offset)
+		}
+		return resp.Body, nil
+	case http.StatusPartialContent:
+		return resp.Body, nil
+	case http.StatusRequestedRangeNotSatisfiable:
+		resp.Body.Close()
+		return nil, errAssetEnd
+	default:
+		code, text := resp.StatusCode, resp.Status
+		resp.Body.Close()
+		return nil, &fetchStatusErr{url: r.url, statusCode: code, statusText: text}
+	}
 }

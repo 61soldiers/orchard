@@ -171,7 +171,16 @@ any future package) independently testable and free of the session state machine
 `Client` ([internal/catalog/client.go](internal/catalog/client.go)) talks to
 `amp-api.music.apple.com` as the signed-in account. Surface: `Storefront`, `Search`, `Album`,
 `Artist`, `Playlist` (pages through `relationships.tracks.next` itself), `Song`, `Lyrics`,
-`Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`.
+`Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`, and the `Library*` methods
+([internal/catalog/library.go](internal/catalog/library.go)) behind `/v1/me/library/*`.
+
+`Library*` reads the account's *own* added music and playlists (`/v1/me/library/...`, not
+storefront-scoped). Apple's library ids (`i.*`/`l.*`/`p.*`) are useless to the stream/download
+pipeline, so every item is resolved to its catalog resource via `include=catalog` (fallback:
+`playParams.catalogId`) before it leaves — the ids handed to a client are catalog ids. Lists
+page internally (100/page, `libraryMaxPages` cap) and return whole. `handleLibrary*Me` in
+[internal/api/library_me.go](internal/api/library_me.go); keep the `LibraryPlaylist` shape in
+sync with elbert's `orchard_service.dart`.
 
 `Artist` requests Apple's discography `views` (top-songs, singles, similar-artists, …) and
 `extend=artistBio,bornOrFormed,origin` — search still returns only id/name/artwork.
@@ -179,6 +188,11 @@ any future package) independently testable and free of the session state machine
 `artistId`/`albumId`. `Groupings` reads the undocumented `/v1/editorial/{sf}/groupings` tree
 and flattens it to titled rows via `collectEditorialGroups` — amp-api-only and best-effort
 (parse failure ⇒ empty, never an error). See [docs/reference.md](docs/reference.md#known-fragility).
+
+Apple returns editorial `notes`/`description`, artist bios and `copyright` as **HTML
+fragments**. `notesText` and the `conv*` funcs run every such field through `htmlToText`
+([internal/catalog/htmltext.go](internal/catalog/htmltext.go)) — tags stripped, entities
+decoded — so the API only ever emits plain text.
 
 **Two independent throttles, don't conflate them**: `maxConcurrent = 8` (a semaphore — how many
 requests may be in flight at once) and `Config.RateLimit`/`RateBurst` (a token bucket — how fast
@@ -234,10 +248,15 @@ unrelated). Resolving a manifest on a cold cache round-trips to Apple and can ta
 still holds.
 
 `fetch()` retries a transient failure (network error, 429, 5xx) via the same `retry` package as
-`catalog`, but **only** before any response bytes are read — once `Open()` starts streaming
-fragments to the caller, a mid-stream failure is not retried (the client sees a truncated file).
-Retrying there would mean re-decrypting a whole track from byte zero, which is exactly what a
-genuine seek being refused (`416`, in `handleSongStream`) already avoids.
+`catalog`, but **only** before any response bytes are read. Once `Open()` is streaming, the
+audio asset's body is wrapped in `resumableReader`: a transport error or a premature EOF (before
+the playlist's declared byte total) reconnects to the CDN with `Range: bytes=<pos>-` and
+continues from the same offset (up to `assetResumeMaxRetries`), so a network blip against
+Apple's edge no longer truncates the stream and make the client skip mid-song. A `416` on
+resume means the asset is fully read (clean EOF). What `resumableReader` does **not** cover is a
+failure inside the daemon's decrypt path (`decryptFragment`/`switchKeys`) — that's
+track-specific and still ends the stream; re-decrypting from byte zero is not attempted, the
+same reason a genuine seek is refused with `416` in `handleSongStream`.
 
 **`handleSongStream`'s Range handling has one deliberate exception, and it's load-bearing**:
 `Range: bytes=0-` is treated as no Range at all rather than refused. ffmpeg/libmpv's HTTP protocol
@@ -356,6 +375,7 @@ budget, not Apple's.
 | `apple.go`       | `/v1/apple/*` — status/login/2fa/logout                                       |
 | `catalog.go`     | `/v1/storefront`, `/v1/search`, `/v1/albums,artists,playlists,songs/{id}...`  |
 | `personal.go`    | `/v1/me/recommendations`, `/v1/me/recent/played` (phase 5)                    |
+| `library_me.go`  | `/v1/me/library/{playlists,playlists/{id},songs,albums,artists}`              |
 | `stream.go`      | `/v1/songs/{id}/variants`, `/v1/songs/{id}/stream`                            |
 | `downloads.go`   | `/v1/downloads*`, `/v1/tracks/{id}/file`, `/v1/library/*` (phase 5 queries)   |
 | `errors.go`      | `writeError`/`writeJSON`/`decodeJSON` — the only place responses get built    |
