@@ -104,10 +104,31 @@ func (m *Manager) BaseDir() string {
 	return filepath.Join(m.prov.RootfsDir(), baseDirRel)
 }
 
+// sessionDBRelPaths are the kvs store's location relative to BaseDir, most
+// preferred first. Newer wrapper builds keep it in mpl_db/; wrapper 1.2.0 and
+// earlier (notably the arm64 release) write it directly under the -B directory.
+var sessionDBRelPaths = []string{
+	filepath.Join("mpl_db", "kvs.sqlitedb"),
+	"kvs.sqlitedb",
+}
+
+// locateSessionDB returns the first existing, non-empty kvs store under baseDir
+// and true, or the preferred path and false when none is present yet.
+func locateSessionDB(baseDir string) (string, bool) {
+	for _, rel := range sessionDBRelPaths {
+		p := filepath.Join(baseDir, rel)
+		if nonEmptyFile(p) {
+			return p, true
+		}
+	}
+	return filepath.Join(baseDir, sessionDBRelPaths[0]), false
+}
+
 // SessionDBPath is the key-value store the daemon writes after a successful
 // login. Its existence is what upstream uses to decide whether -L is needed.
 func (m *Manager) SessionDBPath() string {
-	return filepath.Join(m.BaseDir(), "mpl_db", "kvs.sqlitedb")
+	p, _ := locateSessionDB(m.BaseDir())
+	return p
 }
 
 // LoggedIn reports whether a usable Apple session exists on disk.
@@ -117,8 +138,8 @@ func (m *Manager) SessionDBPath() string {
 // behind. STOREFRONT_ID is deleted at the start of every login and rewritten
 // only once the account has been cached, so require both.
 func (m *Manager) LoggedIn() bool {
-	return nonEmptyFile(m.SessionDBPath()) &&
-		nonEmptyFile(filepath.Join(m.BaseDir(), "STOREFRONT_ID"))
+	_, ok := locateSessionDB(m.BaseDir())
+	return ok && nonEmptyFile(filepath.Join(m.BaseDir(), "STOREFRONT_ID"))
 }
 
 func nonEmptyFile(path string) bool {
@@ -314,7 +335,13 @@ func (m *Manager) Logout(ctx context.Context) error {
 		return err
 	}
 	base := m.BaseDir()
-	for _, name := range []string{"mpl_db", "STOREFRONT_ID", "MUSIC_TOKEN", twoFAFile} {
+	// mpl_db/ and a bare kvs.sqlitedb (+ its -wal/-shm) cover both wrapper
+	// session layouts; STOREFRONT_ID is the file LoggedIn keys on.
+	stale := []string{
+		"mpl_db", "STOREFRONT_ID", "MUSIC_TOKEN", twoFAFile,
+		"kvs.sqlitedb", "kvs.sqlitedb-wal", "kvs.sqlitedb-shm",
+	}
+	for _, name := range stale {
 		if err := os.RemoveAll(filepath.Join(base, name)); err != nil {
 			return fmt.Errorf("remove %s: %w", name, err)
 		}
