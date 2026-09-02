@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -83,6 +84,12 @@ type Supervisor struct {
 	cmd     *exec.Cmd
 	done    chan struct{}
 	running bool
+
+	// keyPort records whether the wrapper binary launched by the most recent
+	// Start accepts -K/--key-port. Older arm64 releases (wrapper 1.2.0 and
+	// earlier) have no key-template service: they abort argument parsing on an
+	// unknown -K and never print "listening key request on". Guarded by mu.
+	keyPort bool
 }
 
 // NewSupervisor returns a Supervisor. onEvent is called from a background
@@ -113,12 +120,23 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 		return fmt.Errorf("wrapper is not installed (state %s)", info.State)
 	}
 
+	keyPort := wrapperHasKeyPort(info.BinPath)
+	s.mu.Lock()
+	s.keyPort = keyPort
+	s.mu.Unlock()
+
 	args := []string{
 		"-H", s.cfg.Host,
 		"-D", strconv.Itoa(s.cfg.Ports.Decrypt),
 		"-M", strconv.Itoa(s.cfg.Ports.M3U8),
 		"-A", strconv.Itoa(s.cfg.Ports.Account),
-		"-K", strconv.Itoa(s.cfg.Ports.Key),
+	}
+	if keyPort {
+		args = append(args, "-K", strconv.Itoa(s.cfg.Ports.Key))
+	} else {
+		slog.Warn("wrapper build has no key-template service (-K); streaming works, "+
+			"key-template downloads will not — upgrade the wrapper release",
+			"binary", info.Binary)
 	}
 	if s.cfg.BaseDir != "" {
 		args = append(args, "-B", s.cfg.BaseDir)
@@ -224,10 +242,17 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	return nil
 }
 
-// WaitListening polls the four services until all accept a connection.
+// WaitListening polls the wrapper's services until all accept a connection
+// (three for a build without the key-template service, four with it).
 func (s *Supervisor) WaitListening(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	ports := []int{s.cfg.Ports.Decrypt, s.cfg.Ports.M3U8, s.cfg.Ports.Account, s.cfg.Ports.Key}
+	s.mu.Lock()
+	keyPort := s.keyPort
+	s.mu.Unlock()
+	ports := []int{s.cfg.Ports.Decrypt, s.cfg.Ports.M3U8, s.cfg.Ports.Account}
+	if keyPort {
+		ports = append(ports, s.cfg.Ports.Key)
+	}
 
 	for {
 		if !s.Running() {
@@ -267,6 +292,16 @@ func (s *Supervisor) scan(r io.Reader) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 
+	// The key-template service comes up last, so its listen line is the "ready"
+	// signal. A wrapper build without it never prints that line; fall back to
+	// the account-info service, which both builds bring up after auth succeeds.
+	s.mu.Lock()
+	readyLine := "listening key request on"
+	if !s.keyPort {
+		readyLine = "listening account info request on"
+	}
+	s.mu.Unlock()
+
 	var storefront string
 	var subscribed bool
 
@@ -297,7 +332,7 @@ func (s *Supervisor) scan(r io.Reader) {
 		case strings.Contains(line, "account info cached successfully"):
 			s.emit(Event{Kind: EventAccountCached, Storefront: storefront, Subscribed: subscribed})
 
-		case strings.Contains(line, "listening key request on"):
+		case strings.Contains(line, readyLine):
 			s.emit(Event{Kind: EventListening, Storefront: storefront, Subscribed: subscribed})
 		}
 	}
@@ -309,4 +344,14 @@ func redact(line string) string {
 		return "[+] Music-Token: <redacted>"
 	}
 	return line
+}
+
+// wrapperHasKeyPort reports whether the wrapper binary accepts -K/--key-port.
+// The daemon aborts all argument parsing on an unknown flag ("invalid option
+// -- 'K'") and exits, so passing -K to a build that predates the key-template
+// service breaks login entirely. --help lists the full option set and exits
+// before the daemon enters its sandbox, so it is a safe probe.
+func wrapperHasKeyPort(binPath string) bool {
+	out, _ := exec.Command(binPath, "-h").CombinedOutput()
+	return bytes.Contains(out, []byte("key-port"))
 }
