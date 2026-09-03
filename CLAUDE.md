@@ -97,6 +97,8 @@ internal/
   catalog/             Apple Music catalog HTTP client — search/album/artist/playlist/song/
                        lyrics/recommendations/recently-played — with its own rate limiter
                        and retry/backoff, independent of everything else
+  playactivity/        the one *write* to Apple: reports a play so it lands in the account's
+                       Recently Played; wire format read off Apple's own musickit.js
   stream/              resolves a track's HLS manifest and decrypts it fragment-by-fragment
                        through the daemon's decrypt oracle; also vendors the cbcs sample
                        decryption logic (stream/decrypt.go)
@@ -110,8 +112,8 @@ internal/
   api/                 chi router, handlers, auth middleware, error mapping
 ```
 
-Dependency direction is strict and one-way: `api` → `download`/`catalog`/`stream`/`apple`/`store` →
-`wrapper`/`ratelimit`/`retry`. Nothing in `internal/` imports `api`, and `catalog`/`stream` don't
+Dependency direction is strict and one-way: `api` →
+`download`/`catalog`/`stream`/`playactivity`/`apple`/`store` → `wrapper`/`ratelimit`/`retry`. Nothing in `internal/` imports `api`, and `catalog`/`stream` don't
 import each other or `download` — `download.Manager` is the only package that holds references to
 both, because it's the only thing that needs a track's metadata *and* its decrypted bytes together.
 
@@ -333,6 +335,43 @@ most worth re-verifying by hand.
 
 ---
 
+## Play activity (`internal/playactivity`)
+
+The only thing in this codebase that **writes** to Apple on the user's behalf. `Client.Report`
+POSTs one play event to `https://universal-activity-service.itunes.apple.com/play`, which is what
+puts a track — and, more visibly, the album or playlist it came from — into the account's Recently
+Played and into the personalization behind `/v1/me/recommendations`.
+
+**The wire format was read off Apple's own published `musickit.js`**
+(`js-cdn.music.apple.com/musickit/v3/musickit.js`), not reverse-engineered from traffic or guessed:
+the `{client_id: "JSCLIENT", event_type: "JSPLAY", data: [...]}` envelope, the kebab-case event
+fields, and every enum value (`event-type` 1 = PLAY_START / 0 = PLAY_END, `end-reason-type` 7 =
+NATURAL_END_OF_TRACK, `source-type` 10 = MUSICKIT, `container-type` 3 = ALBUM / 2 = PLAYLIST, …)
+come from that bundle's `MPAFTracker`/`PlayActivitySender`. If Apple reshapes the feed, that file
+is where to re-read it — the field builders are named after the fields they emit
+(`createFieldFn("end-reason-type", …)`), so they are greppable even minified.
+
+Two things about the payload are load-bearing and easy to get wrong:
+
+- **The container is what shows up, not the song.** `container-type` + `container-ids` (Apple names
+  the id field per type: `album-adam-id`, `global-playlist-id`, `station-id`) are what make
+  Recently Played list "that album" instead of a loose track. Confirmed live: one `start` event with
+  an album container put the album at position 1 of `/v1/me/recent/played` on the very next request;
+  a playlist container did the same for the playlist.
+- **A `start` alone is enough** for Recently Played. The `end` event exists so the listen counts as
+  a real measured play rather than just a visit; a client that only ever reports starts still gets
+  the history behaviour users ask for.
+
+Absent fields are omitted rather than zeroed — that is what MusicKit does (`createFieldFn`'s
+`normalizeReturnValue` drops null), so don't "fill in" an unknown field with a default.
+
+Unlike `catalog`, this package needs the numeric storefront (`143441-…`) on top of the two tokens,
+which is why `apple.Manager` exposes a second, wider source (`PlayActivityTokens`) rather than
+reusing `CatalogTokens`. Nothing here is on playback's critical path: a rejected report costs a
+history entry and nothing else, and both `api` and elbert treat it that way.
+
+---
+
 ## Store (`internal/store`)
 
 SQLite via `modernc.org/sqlite` (pure Go, no cgo — keeps the Docker build simple). Three tables:
@@ -374,7 +413,7 @@ budget, not Apple's.
 | `middleware.go`  | auth, rate limit, request logging (never logs headers or the query string)    |
 | `apple.go`       | `/v1/apple/*` — status/login/2fa/logout                                       |
 | `catalog.go`     | `/v1/storefront`, `/v1/search`, `/v1/albums,artists,playlists,songs/{id}...`  |
-| `personal.go`    | `/v1/me/recommendations`, `/v1/me/recent/played` (phase 5)                    |
+| `personal.go`    | `/v1/me/recommendations`, `/v1/me/recent/played`, `/v1/me/play-activity`      |
 | `library_me.go`  | `/v1/me/library/{playlists,playlists/{id},songs,albums,artists}`              |
 | `stream.go`      | `/v1/songs/{id}/variants`, `/v1/songs/{id}/stream`                            |
 | `downloads.go`   | `/v1/downloads*`, `/v1/tracks/{id}/file`, `/v1/library/*` (phase 5 queries)   |

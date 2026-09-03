@@ -260,6 +260,45 @@ Fetch the full resource by `id`/`type` through the catalog endpoints above — `
 song's HLS asset and has no equivalent for Apple's live radio, so a station can be shown but not
 played or downloaded.
 
+### Play activity
+
+```text
+POST /v1/me/play-activity        -> 202 {reported:true}
+```
+
+Reports a play *back* to Apple, so music streamed or downloaded through Orchard shows up in the
+account's Recently Played — the same feed above — and feeds the personalization behind
+`/v1/me/recommendations`, exactly as if it had been played in one of Apple's own clients. This is
+the only endpoint here that writes to Apple on the user's behalf.
+
+```json
+{ "event": "start",
+  "song_id": "1440650711",
+  "duration_ms": 355145,
+  "start_position_ms": 0,
+  "end_position_ms": 0,
+  "end_reason": "natural",
+  "container_type": "album",
+  "container_id": "1440650428" }
+```
+
+Only `song_id` is required. `event` is `"start"` (the track began playing) or `"end"` (it
+stopped); a player sends one of each per track, the way Apple's clients do. `end_reason` is one of
+`natural` (default), `skipped_forward`, `skipped_backward`, `paused`, `replaced`, `failed`,
+`exited`, `other`, and is ignored on a start. Positions and `duration_ms` are milliseconds.
+
+**`container_type`/`container_id` are what make an album or playlist appear as itself.** Apple
+keys Recently Played on the *container*, not the song: report a play with
+`container_type: "album"` and its catalog album id and the album jumps to the top of
+`GET /v1/me/recent/played`; report the same play with no container and it registers as a loose
+song. `container_type` accepts `album`, `playlist`, `artist` and `radio`; `container_id` must be
+the **catalog** id (an `i.*`/`p.*` library id means nothing to Apple's feed — omit the container
+instead). Verified live: reporting a `start` alone, with an album container, put the album at
+position 1 of Recently Played on the next request.
+
+A 202 means Apple accepted the report. Reporting is not on any playback path and no client should
+treat a failure here as a playback failure — the worst case is a missing history entry.
+
 ### Library
 
 The signed-in account's own added music and personal playlists — distinct from `/v1/library/*`,

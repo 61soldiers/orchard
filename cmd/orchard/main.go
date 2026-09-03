@@ -18,6 +18,7 @@ import (
 	"orchard/internal/catalog"
 	"orchard/internal/config"
 	"orchard/internal/download"
+	"orchard/internal/playactivity"
 	"orchard/internal/store"
 	"orchard/internal/stream"
 	"orchard/internal/webplayback"
@@ -103,6 +104,14 @@ func run() error {
 		slog.Warn("could not reset interrupted jobs", "error", err)
 	}
 
+	// Reporting a play is a write to Apple on the user's behalf, and it is not
+	// on playback's critical path — pace it with the same budget as catalog
+	// reads rather than letting a chatty client hammer Apple.
+	playActivityClient := playactivity.New(appleMgr.PlayActivityTokens, playactivity.Config{
+		RateLimit: cfg.AppleRateLimit,
+		RateBurst: cfg.AppleRateBurst,
+	})
+
 	wpClient := webplayback.New()
 	downloads := download.New(st, streamClient, catalogClient, appleMgr.CatalogTokens, wpClient, download.Config{
 		LibraryDir: cfg.LibraryDir,
@@ -110,8 +119,9 @@ func run() error {
 	go downloads.Run(ctx)
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           api.New(cfg, st, appleMgr, catalogClient, streamClient, appleMgr.CatalogTokens, wpClient, downloads),
+		Addr: cfg.Addr,
+		Handler: api.New(cfg, st, appleMgr, catalogClient, streamClient, appleMgr.CatalogTokens, wpClient,
+			playActivityClient, downloads),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

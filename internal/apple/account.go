@@ -82,6 +82,17 @@ func (m *Manager) CatalogTokens(ctx context.Context) (dev, mut string, err error
 	return acc.DevToken, acc.MusicToken, nil
 }
 
+// PlayActivityTokens adapts Account to the play-activity client's token
+// source. That reporter needs the numeric storefront on top of the two tokens,
+// which is why it is a separate source rather than reusing CatalogTokens.
+func (m *Manager) PlayActivityTokens(ctx context.Context) (dev, mut, storefrontID string, err error) {
+	acc, err := m.Account(ctx)
+	if err != nil {
+		return "", "", "", err
+	}
+	return acc.DevToken, acc.MusicToken, acc.StorefrontID, nil
+}
+
 // accountState is embedded in Manager; kept here so the cache lives with the
 // code that uses it.
 type accountState struct {

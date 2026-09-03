@@ -12,6 +12,7 @@ import (
 	"orchard/internal/catalog"
 	"orchard/internal/config"
 	"orchard/internal/download"
+	"orchard/internal/playactivity"
 	"orchard/internal/ratelimit"
 	"orchard/internal/store"
 	"orchard/internal/stream"
@@ -20,34 +21,37 @@ import (
 
 // Server holds the API dependencies and its router.
 type Server struct {
-	cfg         *config.Config
-	store       *store.Store
-	apple       *apple.Manager
-	catalog     *catalog.Client
-	stream      *stream.Client
-	webplayback *webplayback.Client
-	tokens      catalog.TokenSource
-	downloads   *download.Manager
-	keyDigest   [32]byte
-	limiter     *ratelimit.Limiter
-	router      chi.Router
+	cfg          *config.Config
+	store        *store.Store
+	apple        *apple.Manager
+	catalog      *catalog.Client
+	stream       *stream.Client
+	webplayback  *webplayback.Client
+	tokens       catalog.TokenSource
+	playActivity *playactivity.Client
+	downloads    *download.Manager
+	keyDigest    [32]byte
+	limiter      *ratelimit.Limiter
+	router       chi.Router
 }
 
 // New wires up the router. tokens and wp power the Widevine AAC fallback for
 // tracks with no FairPlay HLS asset (see handleSongStream).
 func New(cfg *config.Config, st *store.Store, appleMgr *apple.Manager, cat *catalog.Client,
-	str *stream.Client, tokens catalog.TokenSource, wp *webplayback.Client, dl *download.Manager) *Server {
+	str *stream.Client, tokens catalog.TokenSource, wp *webplayback.Client, pa *playactivity.Client,
+	dl *download.Manager) *Server {
 	s := &Server{
-		cfg:         cfg,
-		store:       st,
-		apple:       appleMgr,
-		catalog:     cat,
-		stream:      str,
-		webplayback: wp,
-		tokens:      tokens,
-		downloads:   dl,
-		keyDigest:   sha256.Sum256([]byte(cfg.APIKey)),
-		limiter:     ratelimit.New(cfg.RateLimit, cfg.RateBurst),
+		cfg:          cfg,
+		store:        st,
+		apple:        appleMgr,
+		catalog:      cat,
+		stream:       str,
+		webplayback:  wp,
+		tokens:       tokens,
+		playActivity: pa,
+		downloads:    dl,
+		keyDigest:    sha256.Sum256([]byte(cfg.APIKey)),
+		limiter:      ratelimit.New(cfg.RateLimit, cfg.RateBurst),
 	}
 	s.router = s.routes()
 	return s
@@ -93,6 +97,7 @@ func (s *Server) routes() chi.Router {
 
 		r.Get("/me/recommendations", s.handleRecommendations)
 		r.Get("/me/recent/played", s.handleRecentlyPlayed)
+		r.Post("/me/play-activity", s.handlePlayActivity)
 
 		r.Get("/me/library/playlists", s.handleLibraryPlaylistsMe)
 		r.Get("/me/library/playlists/{id}", s.handleLibraryPlaylistMe)
