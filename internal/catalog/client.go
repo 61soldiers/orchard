@@ -561,6 +561,24 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, dst any) er
 }
 
 func (c *Client) doGet(ctx context.Context, dev, mut, path string, q url.Values, dst any) error {
+	return c.do(ctx, http.MethodGet, dev, mut, path, q, dst)
+}
+
+// post issues an authenticated POST. Apple uses POST for a couple of
+// personalization reads that mutate server-side state as a side effect —
+// /v1/me/stations/next-tracks/{id} advances a station's queue — so this is
+// still a read from the caller's point of view, and shares get's retry.
+func (c *Client) post(ctx context.Context, path string, q url.Values, dst any) error {
+	dev, mut, err := c.tokens(ctx)
+	if err != nil {
+		return err
+	}
+	return retry.Do(ctx, retry.Default(), isRetryableErr, func() error {
+		return c.do(ctx, http.MethodPost, dev, mut, path, q, dst)
+	})
+}
+
+func (c *Client) do(ctx context.Context, method, dev, mut, path string, q url.Values, dst any) error {
 	endpoint := path
 	if !strings.HasPrefix(endpoint, "http") {
 		endpoint = ampBase + endpoint
@@ -577,7 +595,7 @@ func (c *Client) doGet(ctx context.Context, dev, mut, path string, q url.Values,
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	if err != nil {
 		return err
 	}

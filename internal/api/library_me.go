@@ -85,3 +85,21 @@ func (s *Server) handleLibraryArtistsMe(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"artists": artists})
 }
+
+// handlePinsMe returns the items the user pinned to the top of their Apple
+// Music library. Ids come back resolved to the catalog wherever Apple has an
+// equivalent, same as every other library read here.
+func (s *Server) handlePinsMe(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	pins, err := s.catalog.Pins(r.Context())
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	if pins == nil {
+		pins = []catalog.Pin{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pins": pins})
+}

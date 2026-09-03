@@ -252,13 +252,41 @@ playlists and stations:
 ```
 
 "Discovery Station" (Apple's personalized radio) shows up the same way, as a `stations`-typed
-item inside `recent/played` or a `"Stations for You"` group — never as a playlist.
+item inside `recent/played` or a `"Stations for You"` group — never as a playlist. It **is**
+playable; see [Stations](#stations) below.
 
 Fetch the full resource by `id`/`type` through the catalog endpoints above — `GET
 /v1/playlists/{id}` for a `playlists` item, `GET /v1/albums/{id}` for `albums`, `GET
-/v1/songs/{id}` for `songs`. A `stations` item is display-only: Orchard's pipeline decrypts a
-song's HLS asset and has no equivalent for Apple's live radio, so a station can be shown but not
-played or downloaded.
+/v1/songs/{id}` for `songs`. A `stations` item is played through `POST
+/v1/stations/{id}/next-tracks`, below.
+
+### Stations
+
+```text
+POST /v1/stations/{id}/next-tracks?limit=  -> {songs:[Song]}
+```
+
+Apple puts two different things behind the `stations` type. A **personalized** station —
+"Discovery Station", an artist or song station, anything in a "Stations for You" group — is a
+rolling queue of ordinary catalog songs, and this returns the next batch of them. Every song comes
+back as the same `Song` shape as everywhere else, so its `id` streams and downloads like any
+other track.
+
+**Each call advances the station.** Two calls return different songs; there is no stable track
+list and no way to page backwards. That is why this is a POST (Apple's own choice — advancing is
+the side effect of reading) and why there is no station-detail GET to render a track listing from.
+A client plays a station by taking a batch, playing it, and asking for the next one as the queue
+drains.
+
+**Pass `limit`.** Apple caps it at **10** — more is a `400` from Apple ("value must be an integer
+less than or equal to 10"), which Orchard avoids by clamping — but omitting it is worse: Apple's
+own default came back as **2 songs** on a live account, which is not enough to play from. `limit=10`
+is what a player wants.
+
+Apple's **live** radio channels (Apple Música 1 and friends) are a continuous broadcast with no
+track list, and nothing in a station's item shape distinguishes them — so they answer `422
+station_not_playable`, which is the only way to find out. Orchard speaks nothing of Apple's
+live-radio protocol and cannot play those.
 
 ### Play activity
 
@@ -310,6 +338,7 @@ GET /v1/me/library/playlists/{id}     -> LibraryPlaylist with tracks
 GET /v1/me/library/songs              -> {songs:[Song]}
 GET /v1/me/library/albums             -> {albums:[Album]}                 (no tracks)
 GET /v1/me/library/artists            -> {artists:[Artist]}               (name + artwork only)
+GET /v1/me/library/pins               -> {pins:[Pin]}
 ```
 
 Apple's library resources have their own id space (`i.*` songs, `l.*` albums, `p.*` playlists)
@@ -318,6 +347,24 @@ resource (via `include=catalog`, falling back to `playParams.catalogId`), so the
 back is the same one `/v1/songs/{id}`, `/v1/albums/{id}`, `/v1/playlists/{id}` and the
 stream/download routes take. A track with no catalog equivalent (uploaded or matched-only) keeps
 its library id and simply won't stream.
+
+`/v1/me/library/pins` is what Apple's own apps call **Pins** — the items a user pins to the top of
+their Library (long-press → Pin), stored server-side and synced across their devices. It is **not**
+part of MusicKit's surface and is not documented by Apple; the endpoint and its shape were found by
+probing a live account, so treat both as observed rather than guaranteed.
+
+```json
+{ "type": "playlists", "id": "pl.u-xxxx", "catalogId": "pl.u-xxxx",
+  "libraryId": "p.JL68vzPioQVRMo", "name": "DEFULTS", "curatorName": "…",
+  "artwork": { "url": "...", "thumbUrl": "..." } }
+```
+
+`type` is normalised to the catalog spelling (`playlists`, `albums`, `artists`, `songs`) with
+Apple's `library-` prefix stripped, and `id` is the id to open — `catalogId` when the pin resolves
+to a catalog resource (via the same `include=catalog` every other library read uses), otherwise the
+library id. A purely personal playlist therefore has a `libraryId` and no `catalogId`, and a client
+routes it the same way it routes `/v1/me/library/playlists`. `artwork` can be absent: a library
+playlist with no cover has none. Order is Apple's own pin order — preserve it.
 
 `LibraryPlaylist` adds `canEdit`, `trackCount` and `catalogId` (the catalog playlist id when the
 playlist mirrors one — `hasCatalog`; empty for a purely personal playlist, whose tracks still

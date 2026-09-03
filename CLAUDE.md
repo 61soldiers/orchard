@@ -173,8 +173,16 @@ any future package) independently testable and free of the session state machine
 `Client` ([internal/catalog/client.go](internal/catalog/client.go)) talks to
 `amp-api.music.apple.com` as the signed-in account. Surface: `Storefront`, `Search`, `Album`,
 `Artist`, `Playlist` (pages through `relationships.tracks.next` itself), `Song`, `Lyrics`,
-`Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`, and the `Library*` methods
+`Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`, `StationTracks`, and the `Library*` methods
 ([internal/catalog/library.go](internal/catalog/library.go)) behind `/v1/me/library/*`.
+
+`Pins` ([internal/catalog/pins.go](internal/catalog/pins.go)) reads `/v1/me/library/pins` — what
+Apple's apps call Pins, the items a user pins to the top of their Library. **Not a MusicKit
+endpoint and not documented anywhere**: it was found by probing a live account, and the only
+resource type actually observed on one was `library-playlists`, so the decoding is deliberately
+type-agnostic (one `rawPinAttrs` covering every pinnable type, absent fields simply staying empty)
+rather than modelled on the one case we can see. It resolves to catalog ids the same way the
+`Library*` methods do; keep the `Pin` shape in sync with elbert's `OrchardPin`.
 
 `Library*` reads the account's *own* added music and playlists (`/v1/me/library/...`, not
 storefront-scoped). Apple's library ids (`i.*`/`l.*`/`p.*`) are useless to the stream/download
@@ -217,10 +225,23 @@ observed live. `Item` carries just enough to render a tile (`id`, `type`, `name`
 `artistName`/`curatorName`, `artwork`) — fetch the full resource by id/type through the regular
 catalog methods once the caller needs more.
 
-A `stations` resource has **no** playable/downloadable path anywhere in this codebase — the
-`stream`/`download` packages only know how to handle a song's HLS asset. Surface a station for
-display; don't build a "play a station" feature without also building an entirely new pipeline for
-Apple's live-radio protocol, which nothing here currently speaks.
+**Apple puts two unrelated things behind the one `stations` type, and only one of them is
+playable.** A *personalized* station — Discovery Station, an artist or song station, anything in a
+"Stations for You" group — is really a rolling, server-generated queue of ordinary catalog songs,
+which `StationTracks` ([internal/catalog/stations.go](internal/catalog/stations.go)) reads via
+`POST /v1/me/stations/next-tracks/{id}` (the endpoint Apple's own musickit.js uses, in
+`MusicItemLoader.loadStationNextTracks`). Those songs go through the normal stream/download path
+like any other track, so nothing new was needed below `catalog`.
+
+**Each call advances the station server-side** — two calls return different songs. There is no
+stable track list, which is why the API exposes it as `POST .../next-tracks` and not as a
+station-detail GET, and why a client plays a station by fetching a batch and coming back for the
+next one as the queue drains (elbert's `AppleMusicStationPlayer` does exactly that).
+
+A *live* station (Apple Música 1 and the other broadcast channels) is the case the old note here
+was about: a continuous broadcast with no track list at all. `StationTracks` returns
+`ErrStationNotPlayable` for those, mapped to a 422. Nothing here speaks Apple's live-radio
+protocol, and building that would still be an entirely new pipeline.
 
 ---
 
@@ -412,9 +433,9 @@ budget, not Apple's.
 | `server.go`      | route table, `Server` struct wiring every dependency                          |
 | `middleware.go`  | auth, rate limit, request logging (never logs headers or the query string)    |
 | `apple.go`       | `/v1/apple/*` — status/login/2fa/logout                                       |
-| `catalog.go`     | `/v1/storefront`, `/v1/search`, `/v1/albums,artists,playlists,songs/{id}...`  |
+| `catalog.go`     | `/v1/storefront`, `/v1/search`, `/v1/albums,artists,playlists,songs/{id}...`, `/v1/stations/{id}/next-tracks` |
 | `personal.go`    | `/v1/me/recommendations`, `/v1/me/recent/played`, `/v1/me/play-activity`      |
-| `library_me.go`  | `/v1/me/library/{playlists,playlists/{id},songs,albums,artists}`              |
+| `library_me.go`  | `/v1/me/library/{playlists,playlists/{id},songs,albums,artists,pins}`         |
 | `stream.go`      | `/v1/songs/{id}/variants`, `/v1/songs/{id}/stream`                            |
 | `downloads.go`   | `/v1/downloads*`, `/v1/tracks/{id}/file`, `/v1/library/*` (phase 5 queries)   |
 | `errors.go`      | `writeError`/`writeJSON`/`decodeJSON` — the only place responses get built    |

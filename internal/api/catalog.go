@@ -17,6 +17,9 @@ import (
 func (s *Server) catalogError(w http.ResponseWriter, r *http.Request, err error) {
 	var apiErr *catalog.APIError
 	switch {
+	case errors.Is(err, catalog.ErrStationNotPlayable):
+		writeError(w, http.StatusUnprocessableEntity, "station_not_playable",
+			"this station has no playable tracks (Apple's live radio channels are broadcast-only)")
 	case errors.Is(err, catalog.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "no such item in the Apple Music catalog")
 	case errors.Is(err, apple.ErrNotReady):
@@ -30,6 +33,24 @@ func (s *Server) catalogError(w http.ResponseWriter, r *http.Request, err error)
 	default:
 		writeInternalError(w, r, err)
 	}
+}
+
+// handleStationTracks returns the next batch of songs for a personalized
+// station. Each call advances the station, so a client fetches a batch, plays
+// it, and comes back for more — there is no stable, re-fetchable track list.
+func (s *Server) handleStationTracks(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	songs, err := s.catalog.StationTracks(r.Context(), id, limit)
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs})
 }
 
 func (s *Server) handleStorefront(w http.ResponseWriter, r *http.Request) {
