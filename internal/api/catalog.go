@@ -20,6 +20,8 @@ func (s *Server) catalogError(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, catalog.ErrStationNotPlayable):
 		writeError(w, http.StatusUnprocessableEntity, "station_not_playable",
 			"this station has no playable tracks (Apple's live radio channels are broadcast-only)")
+	case errors.Is(err, catalog.ErrInvalidCursor):
+		writeError(w, http.StatusBadRequest, "invalid_query", "invalid pagination cursor")
 	case errors.Is(err, catalog.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "no such item in the Apple Music catalog")
 	case errors.Is(err, apple.ErrNotReady):
@@ -128,6 +130,27 @@ func (s *Server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, playlist)
+}
+
+// handlePlaylistTracks returns the next page of a catalog playlist's tracks.
+// cursor must be a tracksNextCursor from the playlist itself or a previous
+// call here — there is no cold-start form, since the first page always comes
+// bundled with GET /v1/playlists/{id}.
+func (s *Server) handlePlaylistTracks(w http.ResponseWriter, r *http.Request) {
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor == "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "cursor is required")
+		return
+	}
+	songs, next, err := s.catalog.PlaylistTracks(r.Context(), chi.URLParam(r, "id"), cursor)
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	if songs == nil {
+		songs = []catalog.Song{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs, "nextCursor": next})
 }
 
 func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {

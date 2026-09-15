@@ -20,11 +20,15 @@ import (
 // `/v1/albums/{id}` and the stream/download routes accept. Items with no
 // catalog equivalent (uploaded or matched-only tracks) keep their library id
 // and simply won't stream.
+//
+// Every list here (playlists, songs, albums, artists, and one playlist's
+// tracks) returns exactly one page per call — cursor, when non-empty, must be
+// exactly the nextCursor a previous call on that same list returned. This
+// mirrors Apple's own opaque "next" pagination rather than re-deriving an
+// offset, and keeps opening a big library list or playlist cheap: the first
+// call is one small request, not a walk to the end.
 
-const (
-	libraryPageLimit = 100
-	libraryMaxPages  = 12 // ~1200 items — plenty for a library browse view
-)
+const libraryPageLimit = 100
 
 // LibraryPlaylist is one of the signed-in account's own playlists. CatalogID
 // is Apple's catalog playlist id when the playlist mirrors a catalog one
@@ -32,14 +36,20 @@ const (
 // still carry their individual catalog ids. Tracks is populated only by
 // LibraryPlaylist(), not by LibraryPlaylists().
 type LibraryPlaylist struct {
-	ID          string   `json:"id"`
-	CatalogID   string   `json:"catalogId,omitempty"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	CanEdit     bool     `json:"canEdit"`
-	TrackCount  int      `json:"trackCount,omitempty"`
-	Artwork     *Artwork `json:"artwork,omitempty"`
-	Tracks      []Song   `json:"tracks,omitempty"`
+	ID          string `json:"id"`
+	CatalogID   string `json:"catalogId,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	CanEdit     bool   `json:"canEdit"`
+	// TrackCount is the number of tracks loaded so far: the true total once
+	// TracksNextCursor is empty, otherwise just this page's count. Apple does
+	// not expose a playlist's track count independently of walking the
+	// tracks relationship, and walking it fully here would defeat the point
+	// of paginating.
+	TrackCount       int      `json:"trackCount,omitempty"`
+	Artwork          *Artwork `json:"artwork,omitempty"`
+	Tracks           []Song   `json:"tracks,omitempty"`
+	TracksNextCursor string   `json:"tracksNextCursor,omitempty"`
 }
 
 type rawLibraryPlayParams struct {
@@ -79,34 +89,61 @@ func libraryQuery() url.Values {
 	}
 }
 
-// LibraryPlaylists lists the account's library playlists (without tracks).
-func (c *Client) LibraryPlaylists(ctx context.Context) ([]LibraryPlaylist, error) {
-	out := []LibraryPlaylist{}
-	path, q := "/v1/me/library/playlists", libraryQuery()
-	for page := 0; page < libraryMaxPages && path != ""; page++ {
-		var resp struct {
-			Data []struct {
-				ID         string                  `json:"id"`
-				Attributes rawLibraryPlaylistAttrs `json:"attributes"`
-			} `json:"data"`
-			Next string `json:"next"`
+// libraryPage fetches exactly one page from a `/v1/me/library/...` list and
+// calls visit for every item on it. cursor, when non-empty, must be exactly
+// the nextCursor a previous call on the same list returned; an empty cursor
+// fetches the first page.
+func (c *Client) libraryPage(ctx context.Context, start, cursor string, visit func(rawLibraryResource)) (next string, err error) {
+	path, q := start, libraryQuery()
+	if cursor != "" {
+		if !validCursor(cursor) {
+			return "", ErrInvalidCursor
 		}
-		if err := c.get(ctx, path, q, &resp); err != nil {
-			if page == 0 {
-				return nil, err
-			}
-			break // partial results beat failing the whole list
-		}
-		for _, d := range resp.Data {
-			out = append(out, convLibraryPlaylist(d.ID, d.Attributes))
-		}
-		path, q = resp.Next, nil
+		path, q = cursor, nil
 	}
-	return out, nil
+	var resp struct {
+		Data []rawLibraryResource `json:"data"`
+		Next string               `json:"next"`
+	}
+	if err := c.get(ctx, path, q, &resp); err != nil {
+		return "", err
+	}
+	for _, d := range resp.Data {
+		visit(d)
+	}
+	return resp.Next, nil
 }
 
-// LibraryPlaylist returns one library playlist with its full track list, each
-// track resolved to its catalog Song.
+// LibraryPlaylists returns one page of the account's library playlists
+// (without tracks). cursor, when non-empty, continues a previous call.
+func (c *Client) LibraryPlaylists(ctx context.Context, cursor string) ([]LibraryPlaylist, string, error) {
+	path, q := "/v1/me/library/playlists", libraryQuery()
+	if cursor != "" {
+		if !validCursor(cursor) {
+			return nil, "", ErrInvalidCursor
+		}
+		path, q = cursor, nil
+	}
+	var resp struct {
+		Data []struct {
+			ID         string                  `json:"id"`
+			Attributes rawLibraryPlaylistAttrs `json:"attributes"`
+		} `json:"data"`
+		Next string `json:"next"`
+	}
+	if err := c.get(ctx, path, q, &resp); err != nil {
+		return nil, "", err
+	}
+	out := make([]LibraryPlaylist, 0, len(resp.Data))
+	for _, d := range resp.Data {
+		out = append(out, convLibraryPlaylist(d.ID, d.Attributes))
+	}
+	return out, resp.Next, nil
+}
+
+// LibraryPlaylist returns one library playlist's metadata and the first page
+// of its tracks, each resolved to its catalog Song. Further pages come from
+// LibraryPlaylistTracks.
 func (c *Client) LibraryPlaylist(ctx context.Context, id string) (*LibraryPlaylist, error) {
 	var meta struct {
 		Data []struct {
@@ -123,87 +160,77 @@ func (c *Client) LibraryPlaylist(ctx context.Context, id string) (*LibraryPlayli
 	}
 	pl := convLibraryPlaylist(meta.Data[0].ID, meta.Data[0].Attributes)
 
-	path, q := metaPath+"/tracks", libraryQuery()
-	for page := 0; page < libraryMaxPages && path != ""; page++ {
-		var resp struct {
-			Data []rawLibraryResource `json:"data"`
-			Next string               `json:"next"`
-		}
-		if err := c.get(ctx, path, q, &resp); err != nil {
-			break
-		}
-		for _, d := range resp.Data {
-			if s, ok := librarySong(d); ok {
-				pl.Tracks = append(pl.Tracks, s)
-			}
-		}
-		path, q = resp.Next, nil
+	tracks, next, err := c.LibraryPlaylistTracks(ctx, id, "")
+	if err != nil {
+		return nil, err
 	}
+	pl.Tracks = tracks
+	pl.TracksNextCursor = next
 	pl.TrackCount = len(pl.Tracks)
 	return &pl, nil
 }
 
-// LibrarySongs lists the account's added songs, as catalog Songs.
-func (c *Client) LibrarySongs(ctx context.Context) ([]Song, error) {
-	out := []Song{}
-	if err := c.libraryPages(ctx, "/v1/me/library/songs", func(d rawLibraryResource) {
+// LibraryPlaylistTracks returns one page of a library playlist's tracks, each
+// resolved to its catalog Song. cursor is empty for the first page, or a
+// TracksNextCursor from a previous call to continue.
+func (c *Client) LibraryPlaylistTracks(ctx context.Context, id, cursor string) ([]Song, string, error) {
+	path := "/v1/me/library/playlists/" + url.PathEscape(id) + "/tracks"
+	var tracks []Song
+	next, err := c.libraryPage(ctx, path, cursor, func(d rawLibraryResource) {
+		if s, ok := librarySong(d); ok {
+			tracks = append(tracks, s)
+		}
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return tracks, next, nil
+}
+
+// LibrarySongs returns one page of the account's added songs, as catalog
+// Songs. cursor is empty for the first page.
+func (c *Client) LibrarySongs(ctx context.Context, cursor string) ([]Song, string, error) {
+	var out []Song
+	next, err := c.libraryPage(ctx, "/v1/me/library/songs", cursor, func(d rawLibraryResource) {
 		if s, ok := librarySong(d); ok {
 			out = append(out, s)
 		}
-	}); err != nil {
-		return nil, err
+	})
+	if err != nil {
+		return nil, "", err
 	}
-	return out, nil
+	return out, next, nil
 }
 
-// LibraryAlbums lists the account's added albums, as catalog Albums (no tracks).
-func (c *Client) LibraryAlbums(ctx context.Context) ([]Album, error) {
-	out := []Album{}
-	if err := c.libraryPages(ctx, "/v1/me/library/albums", func(d rawLibraryResource) {
+// LibraryAlbums returns one page of the account's added albums, as catalog
+// Albums (no tracks). cursor is empty for the first page.
+func (c *Client) LibraryAlbums(ctx context.Context, cursor string) ([]Album, string, error) {
+	var out []Album
+	next, err := c.libraryPage(ctx, "/v1/me/library/albums", cursor, func(d rawLibraryResource) {
 		if a, ok := libraryAlbum(d); ok {
 			out = append(out, a)
 		}
-	}); err != nil {
-		return nil, err
+	})
+	if err != nil {
+		return nil, "", err
 	}
-	return out, nil
+	return out, next, nil
 }
 
-// LibraryArtists lists the account's added artists, as catalog Artists (name
-// and artwork only — no discography views).
-func (c *Client) LibraryArtists(ctx context.Context) ([]Artist, error) {
-	out := []Artist{}
-	if err := c.libraryPages(ctx, "/v1/me/library/artists", func(d rawLibraryResource) {
+// LibraryArtists returns one page of the account's added artists, as catalog
+// Artists (name and artwork only — no discography views). cursor is empty
+// for the first page.
+func (c *Client) LibraryArtists(ctx context.Context, cursor string) ([]Artist, string, error) {
+	var out []Artist
+	next, err := c.libraryPage(ctx, "/v1/me/library/artists", cursor, func(d rawLibraryResource) {
 		if a, ok := libraryArtist(d); ok {
 			out = append(out, a)
 		}
-	}); err != nil {
-		return nil, err
+	})
+	if err != nil {
+		return nil, "", err
 	}
-	return out, nil
-}
-
-// libraryPages walks a `/v1/me/library/...` list, following `next`, and calls
-// visit for every item. A mid-walk failure keeps whatever was collected so far.
-func (c *Client) libraryPages(ctx context.Context, start string, visit func(rawLibraryResource)) error {
-	path, q := start, libraryQuery()
-	for page := 0; page < libraryMaxPages && path != ""; page++ {
-		var resp struct {
-			Data []rawLibraryResource `json:"data"`
-			Next string               `json:"next"`
-		}
-		if err := c.get(ctx, path, q, &resp); err != nil {
-			if page == 0 {
-				return err
-			}
-			return nil
-		}
-		for _, d := range resp.Data {
-			visit(d)
-		}
-		path, q = resp.Next, nil
-	}
-	return nil
+	return out, next, nil
 }
 
 func convLibraryPlaylist(id string, a rawLibraryPlaylistAttrs) LibraryPlaylist {

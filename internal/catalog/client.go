@@ -37,7 +37,20 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrUnauthorized means the tokens were rejected; the session likely expired.
 	ErrUnauthorized = errors.New("apple rejected the session tokens")
+	// ErrInvalidCursor is returned when a client-supplied pagination cursor
+	// isn't a relative Apple API path.
+	ErrInvalidCursor = errors.New("invalid pagination cursor")
 )
+
+// validCursor reports whether a client-supplied pagination cursor is safe to
+// use as a request path. A cursor is meant to be echoed back verbatim from a
+// previous response's nextCursor — always a path relative to Apple's own API
+// — never an absolute URL: the request that follows one attaches the Apple
+// session's bearer and media-user tokens, and a crafted cursor could
+// otherwise redirect that request (tokens included) to an arbitrary host.
+func validCursor(cursor string) bool {
+	return strings.HasPrefix(cursor, "/v1/") && !strings.Contains(cursor, "://")
+}
 
 // TokenSource supplies the developer and media-user tokens.
 type TokenSource func(ctx context.Context) (devToken, musicToken string, err error)
@@ -265,8 +278,13 @@ func (c *Client) Artist(ctx context.Context, id string) (*Artist, error) {
 	return &a, nil
 }
 
-// Playlist returns a playlist with its tracks. Apple pages long playlists, so
-// this follows the tracks relationship until it is exhausted.
+// Playlist returns a playlist's metadata and the first page of its tracks.
+// A long playlist pages further with PlaylistTracks(ctx, id, cursor), cursor
+// being the returned Playlist.TracksNextCursor — this is what the HTTP API
+// exposes, so opening a big playlist costs one small request instead of
+// walking every page up front. A caller that genuinely needs every track in
+// one call (the download pipeline, which has to queue every song) should use
+// PlaylistFull instead.
 func (c *Client) Playlist(ctx context.Context, id string) (*Playlist, error) {
 	sf, err := c.Storefront(ctx)
 	if err != nil {
@@ -287,31 +305,67 @@ func (c *Client) Playlist(ctx context.Context, id string) (*Playlist, error) {
 		return nil, ErrNotFound
 	}
 	p := convPlaylist(out.Data[0])
+	p.TracksNextCursor = out.Data[0].Relationships.Tracks.Next
+	return &p, nil
+}
+
+// PlaylistTracks returns the next page of a catalog playlist's tracks. cursor
+// must be a TracksNextCursor from a previous Playlist or PlaylistTracks call
+// on the same playlist — there is no cold-start form here, since the first
+// page always comes bundled with Playlist itself.
+func (c *Client) PlaylistTracks(ctx context.Context, id, cursor string) ([]Song, string, error) {
+	if cursor == "" {
+		return nil, "", errors.New("cursor is required")
+	}
+	if !validCursor(cursor) {
+		return nil, "", ErrInvalidCursor
+	}
 
 	// Apple's "next" link carries the original query forward, but re-assert
 	// include[songs] so every page's tracks keep their artist/album ids.
 	pageQ := url.Values{"include[songs]": {"artists,albums"}}
-	next := out.Data[0].Relationships.Tracks.Next
-	for next != "" {
-		var page struct {
-			Data []rawSong `json:"data"`
-			Next string    `json:"next"`
+	var page struct {
+		Data []rawSong `json:"data"`
+		Next string    `json:"next"`
+	}
+	if err := c.get(ctx, cursor, pageQ, &page); err != nil {
+		return nil, "", err
+	}
+	var tracks []Song
+	for _, t := range page.Data {
+		if t.Type == "songs" {
+			tracks = append(tracks, convSong(t))
 		}
-		if err := c.get(ctx, next, pageQ, &page); err != nil {
+	}
+	next := page.Next
+	if next == cursor {
+		next = ""
+	}
+	return tracks, next, nil
+}
+
+// PlaylistFull returns a playlist with every track resolved, following
+// Apple's tracks pagination until it is exhausted. Used by the download
+// pipeline, which needs the complete track list to queue every song; an API
+// response should use Playlist/PlaylistTracks instead so a big playlist
+// doesn't cost one huge request.
+func (c *Client) PlaylistFull(ctx context.Context, id string) (*Playlist, error) {
+	p, err := c.Playlist(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	next := p.TracksNextCursor
+	p.TracksNextCursor = ""
+	for next != "" {
+		tracks, n, err := c.PlaylistTracks(ctx, id, next)
+		if err != nil {
 			// Partial results beat failing the whole request.
 			break
 		}
-		for _, t := range page.Data {
-			if t.Type == "songs" {
-				p.Tracks = append(p.Tracks, convSong(t))
-			}
-		}
-		if page.Next == next {
-			break
-		}
-		next = page.Next
+		p.Tracks = append(p.Tracks, tracks...)
+		next = n
 	}
-	return &p, nil
+	return p, nil
 }
 
 // Song returns a single track.

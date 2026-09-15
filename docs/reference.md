@@ -142,12 +142,27 @@ GET /v1/storefront                  -> {storefront}
 GET /v1/search?term=&types=&limit=  -> {songs,albums,artists,playlists}
 GET /v1/albums/{id}                 -> album with full track list
 GET /v1/artists/{id}                -> artist with bio, images and discography views
-GET /v1/playlists/{id}              -> playlist with all tracks (paged transparently)
+GET /v1/playlists/{id}              -> playlist + first page of tracks, tracksNextCursor if more
+GET /v1/playlists/{id}/tracks?cursor= -> {songs, nextCursor}
 GET /v1/songs/{id}                  -> single song
 GET /v1/songs/{id}/lyrics           -> {songId, format:"ttml", ttml, lrc, syncLevel}
 GET /v1/charts?types=&genre=&limit= -> {songs,albums,playlists}
 GET /v1/browse                      -> {groups:[{id,title,items:[...]}]}
 ```
+
+`/v1/playlists/{id}` returns the playlist's metadata plus only the first page of tracks (however
+many Apple hands back per page, unmodified — Orchard does not request a specific size). If there
+are more, `tracksNextCursor` is set; fetch further pages from `/v1/playlists/{id}/tracks?cursor=`,
+passing that value back verbatim, until a response's `nextCursor` comes back empty. A cursor is
+opaque — treat it as a token, not a page number, and don't construct one by hand. It must be
+echoed back exactly as received or the request fails `400 invalid_query`; in particular it can
+never be an absolute URL (only a path under `/v1/...`), since the request that follows one carries
+the Apple session's own tokens and a crafted cursor could otherwise redirect that request, tokens
+included, to an arbitrary host. This is what lets a client open a long playlist cheaply — one
+small request instead of Apple's tracks relationship walked to the end — for exactly the pages a
+user scrolls to; nothing else about `/v1/playlists/{id}`'s shape changed. The download pipeline
+still needs every track to queue a `type: playlist` job, so it walks pagination internally rather
+than exposing it — that's unaffected by this.
 
 `types` is a comma-separated subset of `songs,albums,artists,playlists` and defaults to all four.
 `limit` defaults to 25 and is clamped to Apple's maximum of 25.
@@ -333,12 +348,13 @@ The signed-in account's own added music and personal playlists — distinct from
 which is Orchard's index of files it has *downloaded*.
 
 ```text
-GET /v1/me/library/playlists          -> {playlists:[LibraryPlaylist]}   (no tracks)
-GET /v1/me/library/playlists/{id}     -> LibraryPlaylist with tracks
-GET /v1/me/library/songs              -> {songs:[Song]}
-GET /v1/me/library/albums             -> {albums:[Album]}                 (no tracks)
-GET /v1/me/library/artists            -> {artists:[Artist]}               (name + artwork only)
-GET /v1/me/library/pins               -> {pins:[Pin]}
+GET /v1/me/library/playlists?cursor=              -> {playlists:[LibraryPlaylist], nextCursor}  (no tracks)
+GET /v1/me/library/playlists/{id}                 -> LibraryPlaylist + first page of tracks, tracksNextCursor if more
+GET /v1/me/library/playlists/{id}/tracks?cursor=  -> {songs, nextCursor}
+GET /v1/me/library/songs?cursor=                  -> {songs:[Song], nextCursor}
+GET /v1/me/library/albums?cursor=                 -> {albums:[Album], nextCursor}                (no tracks)
+GET /v1/me/library/artists?cursor=                -> {artists:[Artist], nextCursor}              (name + artwork only)
+GET /v1/me/library/pins                           -> {pins:[Pin]}
 ```
 
 Apple's library resources have their own id space (`i.*` songs, `l.*` albums, `p.*` playlists)
@@ -369,9 +385,17 @@ playlist with no cover has none. Order is Apple's own pin order — preserve it.
 `LibraryPlaylist` adds `canEdit`, `trackCount` and `catalogId` (the catalog playlist id when the
 playlist mirrors one — `hasCatalog`; empty for a purely personal playlist, whose tracks still
 carry their own catalog ids) to the normal playlist shape. Library playlists frequently have no
-`artwork`. Lists are internally paged (100/page, up to ~1200 items) and returned whole — no
-`limit`/`offset`/`next`. Same `apple_not_ready` / `apple_unauthorized` / `apple_error` mapping
-as the rest of the catalog.
+`artwork`.
+
+Every list above returns one page (100 items) per call plus a `nextCursor`, empty once the list is
+exhausted — the same opaque, echo-it-back-verbatim cursor contract as `/v1/playlists/{id}/tracks`
+(see the Catalog section above), including the same "must be a relative `/v1/...` path" validation
+and `400 invalid_query` on anything else. `trackCount` on a `LibraryPlaylist` follows from this: it
+counts only the tracks loaded so far (this page), becoming the true total once
+`tracksNextCursor` is empty — Apple exposes no track count independent of walking the tracks
+relationship, so reporting a total up front would mean walking it fully and defeating the point of
+paginating. Same `apple_not_ready` / `apple_unauthorized` / `apple_error` mapping as the rest of
+the catalog.
 
 ### Streaming
 

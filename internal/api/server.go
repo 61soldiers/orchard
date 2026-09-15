@@ -87,6 +87,7 @@ func (s *Server) routes() chi.Router {
 		r.Get("/albums/{id}", s.handleAlbum)
 		r.Get("/artists/{id}", s.handleArtist)
 		r.Get("/playlists/{id}", s.handlePlaylist)
+		r.Get("/playlists/{id}/tracks", s.handlePlaylistTracks)
 		r.Get("/songs/{id}", s.handleSong)
 		r.Get("/songs/{id}/lyrics", s.handleLyrics)
 		r.Get("/songs/{id}/variants", s.handleSongVariants)
@@ -102,6 +103,7 @@ func (s *Server) routes() chi.Router {
 
 		r.Get("/me/library/playlists", s.handleLibraryPlaylistsMe)
 		r.Get("/me/library/playlists/{id}", s.handleLibraryPlaylistMe)
+		r.Get("/me/library/playlists/{id}/tracks", s.handleLibraryPlaylistTracksMe)
 		r.Get("/me/library/songs", s.handleLibrarySongsMe)
 		r.Get("/me/library/albums", s.handleLibraryAlbumsMe)
 		r.Get("/me/library/artists", s.handleLibraryArtistsMe)

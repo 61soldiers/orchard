@@ -172,7 +172,7 @@ func (m *Manager) expand(ctx context.Context, req Request) ([]string, error) {
 		return keep(songIDs(album.Tracks)), nil
 
 	case "playlist":
-		pl, err := m.catalog.Playlist(ctx, req.CatalogID)
+		pl, err := m.catalog.PlaylistFull(ctx, req.CatalogID)
 		if err != nil {
 			return nil, err
 		}

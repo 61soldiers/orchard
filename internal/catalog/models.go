@@ -86,16 +86,20 @@ type Artist struct {
 	ArtistPlaylists []Playlist `json:"artistPlaylists,omitempty"` // artist-playlists
 }
 
-// Playlist is a catalog playlist. Tracks is populated by Playlist().
+// Playlist is a catalog playlist. Tracks is populated by Playlist() (first
+// page only) or PlaylistFull() (every track). TracksNextCursor is set by
+// Playlist() whenever there are more tracks than fit in the first page; pass
+// it to PlaylistTracks() to fetch the next page.
 type Playlist struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	CuratorName  string   `json:"curatorName,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	PlaylistType string   `json:"playlistType,omitempty"`
-	LastModified string   `json:"lastModified,omitempty"`
-	Artwork      *Artwork `json:"artwork,omitempty"`
-	Tracks       []Song   `json:"tracks,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	CuratorName      string   `json:"curatorName,omitempty"`
+	Description      string   `json:"description,omitempty"`
+	PlaylistType     string   `json:"playlistType,omitempty"`
+	LastModified     string   `json:"lastModified,omitempty"`
+	Artwork          *Artwork `json:"artwork,omitempty"`
+	Tracks           []Song   `json:"tracks,omitempty"`
+	TracksNextCursor string   `json:"tracksNextCursor,omitempty"`
 }
 
 // SearchResults holds whatever types the caller asked for.

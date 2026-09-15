@@ -172,9 +172,25 @@ any future package) independently testable and free of the session state machine
 
 `Client` ([internal/catalog/client.go](internal/catalog/client.go)) talks to
 `amp-api.music.apple.com` as the signed-in account. Surface: `Storefront`, `Search`, `Album`,
-`Artist`, `Playlist` (pages through `relationships.tracks.next` itself), `Song`, `Lyrics`,
-`Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`, `StationTracks`, and the `Library*` methods
-([internal/catalog/library.go](internal/catalog/library.go)) behind `/v1/me/library/*`.
+`Artist`, `Playlist` (metadata + first page of tracks only — see pagination below), `Song`,
+`Lyrics`, `Charts`, `Groupings`, `Recommendations`, `RecentlyPlayed`, `StationTracks`, and the
+`Library*` methods ([internal/catalog/library.go](internal/catalog/library.go)) behind
+`/v1/me/library/*`.
+
+**Playlist tracks paginate; the download pipeline doesn't get to see that.** `Playlist(ctx, id)`
+fetches metadata plus only the first page of `relationships.tracks` (however big Apple's own
+default page is) and sets `TracksNextCursor` to Apple's own `next` link when there's more —
+`PlaylistTracks(ctx, id, cursor)` fetches the next page, `cursor` being that value echoed back
+verbatim. This is what `handlePlaylist`/`handlePlaylistTracks` expose over HTTP, so a client opens
+a long playlist for the cost of one small request instead of Apple's tracks relationship walked to
+the end. `download.Manager` still needs every track to queue a `type: playlist` job, so it calls
+`PlaylistFull(ctx, id)` instead — the old walk-until-exhausted behavior, kept under its own name
+rather than the default, so a future caller of `Playlist` doesn't silently get the download
+pipeline's full-fetch cost. A cursor is validated (`validCursor` in client.go: must be a relative
+`/v1/...` path, never an absolute URL) before it's used as a request path — the request that
+follows one carries the Apple session's bearer/media-user tokens, so an unchecked cursor would be
+an exfiltration vector, not just a correctness bug. `Library*` reuses the identical cursor
+contract (see below) via the same `validCursor`.
 
 `Pins` ([internal/catalog/pins.go](internal/catalog/pins.go)) reads `/v1/me/library/pins` — what
 Apple's apps call Pins, the items a user pins to the top of their Library. **Not a MusicKit
@@ -187,10 +203,16 @@ rather than modelled on the one case we can see. It resolves to catalog ids the 
 `Library*` reads the account's *own* added music and playlists (`/v1/me/library/...`, not
 storefront-scoped). Apple's library ids (`i.*`/`l.*`/`p.*`) are useless to the stream/download
 pipeline, so every item is resolved to its catalog resource via `include=catalog` (fallback:
-`playParams.catalogId`) before it leaves — the ids handed to a client are catalog ids. Lists
-page internally (100/page, `libraryMaxPages` cap) and return whole. `handleLibrary*Me` in
-[internal/api/library_me.go](internal/api/library_me.go); keep the `LibraryPlaylist` shape in
-sync with elbert's `orchard_service.dart`.
+`playParams.catalogId`) before it leaves — the ids handed to a client are catalog ids.
+`LibraryPlaylists`, `LibrarySongs`, `LibraryAlbums`, `LibraryArtists` and `LibraryPlaylistTracks`
+each return exactly **one page** (100 items) plus a `next`/`nextCursor`, rather than walking to
+the end internally — mirrors the `Playlist`/`PlaylistTracks` split above, and for the same reason:
+opening the Apple Music library tab or a big personal playlist shouldn't cost one request that
+resolves the whole thing. `LibraryPlaylist(ctx, id)` (singular) is metadata + first tracks page,
+same shape as catalog `Playlist`; its `TrackCount` is therefore only the page-so-far count until
+`TracksNextCursor` goes empty (documented on the field — don't read it as a true total before
+that). `handleLibrary*Me` in [internal/api/library_me.go](internal/api/library_me.go); keep the
+`LibraryPlaylist` shape in sync with elbert's `orchard_service.dart`.
 
 `Artist` requests Apple's discography `views` (top-songs, singles, similar-artists, …) and
 `extend=artistBio,bornOrFormed,origin` — search still returns only id/name/artwork.
