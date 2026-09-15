@@ -271,7 +271,7 @@ func librarySong(d rawLibraryResource) (Song, bool) {
 	return Song{
 		ID: id, Name: la.Name, ArtistName: la.ArtistName,
 		AlbumName: la.AlbumName, DiscNumber: la.DiscNumber, TrackNumber: la.TrackNumber,
-		DurationMs: la.DurationInMillis, ReleaseDate: la.ReleaseDate,
+		DurationMs: la.DurationInMillis, ISRC: la.ISRC, ReleaseDate: la.ReleaseDate,
 		Genres: la.GenreNames, ContentRating: la.ContentRating,
 		HasLyrics: la.HasLyrics, HasSyncLyrics: la.HasTimeSyncedLyrics,
 		Quality: convQuality(la.AudioTraits), Artwork: convArtwork(la.Artwork),

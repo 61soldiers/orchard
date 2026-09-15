@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -135,4 +136,152 @@ func (s *Server) handlePinsMe(w http.ResponseWriter, r *http.Request) {
 		pins = []catalog.Pin{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"pins": pins})
+}
+
+// ---------------------------------------------------------------------------
+// Library playlist writes
+// ---------------------------------------------------------------------------
+//
+// The four routes below are the only ones in `/v1/me/library/*` that change
+// anything on Apple's side. They exist so a client can manage the account's
+// own playlists — create, rename, add to, reorder/remove — instead of only
+// reading them; `elbert` uses them for the same playlist editing it already
+// offers for local and Subsonic playlists.
+//
+// Track ids are the **catalog** ids every other endpoint here hands out, so a
+// client can take a song straight from a search result or an album and put it
+// in a playlist without a second lookup. Reordering and removing are both
+// PUT: Apple has no "move" or "remove one" operation, so the client sends the
+// full list in its intended order (see catalog.SetLibraryPlaylistTracks).
+
+// handleCreateLibraryPlaylistMe creates a playlist in the account's library.
+func (s *Server) handleCreateLibraryPlaylistMe(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	var body struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		TrackIDs    []string `json:"trackIds"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_body", "name is required")
+		return
+	}
+
+	playlist, err := s.catalog.CreateLibraryPlaylist(r.Context(), body.Name, body.Description, body.TrackIDs)
+	if err != nil {
+		s.libraryWriteError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, playlist)
+}
+
+// handleUpdateLibraryPlaylistMe renames and/or re-describes a playlist.
+func (s *Server) handleUpdateLibraryPlaylistMe(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	var body struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" && strings.TrimSpace(body.Description) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_body", "name or description is required")
+		return
+	}
+
+	if err := s.catalog.UpdateLibraryPlaylist(r.Context(), chi.URLParam(r, "id"), body.Name, body.Description); err != nil {
+		s.libraryWriteError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleDeleteLibraryPlaylistMe removes a playlist from the library.
+func (s *Server) handleDeleteLibraryPlaylistMe(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	if err := s.catalog.DeleteLibraryPlaylist(r.Context(), chi.URLParam(r, "id")); err != nil {
+		s.libraryWriteError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleAddLibraryPlaylistTracksMe appends tracks to a playlist.
+func (s *Server) handleAddLibraryPlaylistTracksMe(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	var body struct {
+		TrackIDs []string `json:"trackIds"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if len(body.TrackIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_body", "trackIds is required")
+		return
+	}
+
+	if err := s.catalog.AddLibraryPlaylistTracks(r.Context(), chi.URLParam(r, "id"), body.TrackIDs); err != nil {
+		s.libraryWriteError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleSetLibraryPlaylistTracksMe replaces a playlist's contents with
+// exactly the ids given, in that order — the reorder and remove operation.
+//
+// Emptying a playlist needs `"allowEmpty": true` alongside an empty list, so
+// a client bug that loses its track list can't silently wipe one.
+func (s *Server) handleSetLibraryPlaylistTracksMe(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	var body struct {
+		TrackIDs   []string `json:"trackIds"`
+		AllowEmpty bool     `json:"allowEmpty"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+
+	err := s.catalog.SetLibraryPlaylistTracks(r.Context(), chi.URLParam(r, "id"), body.TrackIDs, body.AllowEmpty)
+	if err != nil {
+		s.libraryWriteError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// libraryWriteError adds the two failures only a write can produce to the
+// shared catalog error mapping: an empty track list (a client bug, 400) and
+// Apple refusing to edit a playlist the account doesn't own (403).
+func (s *Server) libraryWriteError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, catalog.ErrEmptyTrackList) {
+		writeError(w, http.StatusBadRequest, "invalid_body",
+			"track list is empty; pass allowEmpty to clear a playlist")
+		return
+	}
+	var apiErr *catalog.APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+		writeError(w, http.StatusForbidden, "playlist_not_editable",
+			"Apple refused this edit; only playlists the signed-in account owns can be changed")
+		return
+	}
+	s.catalogError(w, r, err)
 }

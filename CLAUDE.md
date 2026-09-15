@@ -265,6 +265,35 @@ was about: a continuous broadcast with no track list at all. `StationTracks` ret
 `ErrStationNotPlayable` for those, mapped to a 422. Nothing here speaks Apple's live-radio
 protocol, and building that would still be an entirely new pipeline.
 
+**Library playlists can be written, not just read**
+([internal/catalog/library_write.go](internal/catalog/library_write.go)). Create, rename, delete,
+append tracks, and replace the whole ordered track list — enough for a client to manage the
+account's own playlists. Three things about it are load-bearing:
+
+- **Reorder and remove are the same operation as replace.** Apple has no "move track" or "remove
+  one track" on a library playlist, so `SetLibraryPlaylistTracks` sends the complete list in its
+  intended order. A caller holding only one page of a paginated playlist would silently truncate
+  it — which is why the elbert side walks every page before calling. Clearing a playlist needs an
+  explicit `allowEmpty`, so the shape a client bug takes (an empty list) is a 400 rather than a
+  wiped playlist.
+- **Retries are split by idempotency**, which is why `sendJSON` and `sendIdempotent` are separate
+  in [client.go](internal/catalog/client.go) rather than one helper: a retried create makes a
+  second playlist and a retried append duplicates tracks, so those two don't retry; `PATCH`/`PUT`/
+  `DELETE` do.
+- **Ids are catalog ids**, like every other library read here — except one starting with `i.`,
+  which is a library-only track (uploaded or matched) and goes back as a `library-songs`
+  reference. `trackRefType` is the whole of that rule.
+
+Verified live against the real account (create → add → rename → reorder → remove → delete, all
+clean). The one surprise worth knowing: **Apple silently drops a track id it can't resolve** — one
+of the three library songs used was no longer in the catalog (`GET /v1/songs/{id}` 404s for it),
+and the add still answered `200 {"ok":true}` having added only the other two. A 2xx here does not
+mean every id landed.
+
+A successful library write is usually `204 No Content`, and Apple sometimes answers a create with
+`201` and an empty body — `doWrite` treats both as success, and `CreateLibraryPlaylist` falls back
+to returning what it asked for rather than failing a write that actually happened.
+
 ---
 
 ## Streaming (`internal/stream`)

@@ -7,6 +7,7 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -630,6 +631,97 @@ func (c *Client) post(ctx context.Context, path string, q url.Values, dst any) e
 	return retry.Do(ctx, retry.Default(), isRetryableErr, func() error {
 		return c.do(ctx, http.MethodPost, dev, mut, path, q, dst)
 	})
+}
+
+// sendJSON issues an authenticated write (POST/PATCH/PUT/DELETE) carrying an
+// optional JSON body, decoding the response into dst when dst is non-nil and
+// Apple actually returned one — a successful library write is usually 204 No
+// Content, so an empty body is the normal case, not an error.
+//
+// Deliberately not retried: the caller decides, because "did this already
+// happen?" differs per operation (see sendIdempotent).
+func (c *Client) sendJSON(ctx context.Context, method, path string, body any, dst any) error {
+	dev, mut, err := c.tokens(ctx)
+	if err != nil {
+		return err
+	}
+	return c.doWrite(ctx, method, dev, mut, path, body, dst)
+}
+
+// sendIdempotent is sendJSON for the writes that can safely be repeated —
+// PATCH (set these attributes), PUT (make the list exactly this), DELETE
+// (make it gone) — so a 429 or a flaky connection gets the same backoff
+// every read here already has. A create or an append must not use this.
+func (c *Client) sendIdempotent(ctx context.Context, method, path string, body any) error {
+	dev, mut, err := c.tokens(ctx)
+	if err != nil {
+		return err
+	}
+	return retry.Do(ctx, retry.Default(), isRetryableErr, func() error {
+		return c.doWrite(ctx, method, dev, mut, path, body, nil)
+	})
+}
+
+func (c *Client) doWrite(ctx context.Context, method, dev, mut, path string, body any, dst any) error {
+	endpoint := path
+	if !strings.HasPrefix(endpoint, "http") {
+		endpoint = ampBase + endpoint
+	}
+
+	var payload io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode apple library request: %w", err)
+		}
+		payload = bytes.NewReader(encoded)
+	}
+
+	if err := c.limiter.Wait(ctx); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, payload)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+dev)
+	req.Header.Set("Media-User-Token", mut)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	select {
+	case c.sem <- struct{}{}:
+		defer func() { <-c.sem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("apple library request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return apiError(resp)
+	}
+	if dst == nil || resp.StatusCode == http.StatusNoContent {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			// 200/201 with no body: Apple does this for some library
+			// writes. The write succeeded; there is just nothing to read.
+			return nil
+		}
+		return fmt.Errorf("decode apple library response: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) do(ctx context.Context, method, dev, mut, path string, q url.Values, dst any) error {

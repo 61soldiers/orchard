@@ -102,8 +102,13 @@ func (s *Server) routes() chi.Router {
 		r.Post("/me/play-activity", s.handlePlayActivity)
 
 		r.Get("/me/library/playlists", s.handleLibraryPlaylistsMe)
+		r.Post("/me/library/playlists", s.handleCreateLibraryPlaylistMe)
 		r.Get("/me/library/playlists/{id}", s.handleLibraryPlaylistMe)
 		r.Get("/me/library/playlists/{id}/tracks", s.handleLibraryPlaylistTracksMe)
+		r.Patch("/me/library/playlists/{id}", s.handleUpdateLibraryPlaylistMe)
+		r.Delete("/me/library/playlists/{id}", s.handleDeleteLibraryPlaylistMe)
+		r.Post("/me/library/playlists/{id}/tracks", s.handleAddLibraryPlaylistTracksMe)
+		r.Put("/me/library/playlists/{id}/tracks", s.handleSetLibraryPlaylistTracksMe)
 		r.Get("/me/library/songs", s.handleLibrarySongsMe)
 		r.Get("/me/library/albums", s.handleLibraryAlbumsMe)
 		r.Get("/me/library/artists", s.handleLibraryArtistsMe)

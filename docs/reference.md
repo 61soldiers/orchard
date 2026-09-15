@@ -382,6 +382,43 @@ library id. A purely personal playlist therefore has a `libraryId` and no `catal
 routes it the same way it routes `/v1/me/library/playlists`. `artwork` can be absent: a library
 playlist with no cover has none. Order is Apple's own pin order — preserve it.
 
+#### Editing library playlists
+
+The signed-in account's own playlists can be written to, so a client can manage them instead of
+only reading them:
+
+```text
+POST   /v1/me/library/playlists              {name, description?, trackIds?}  -> 201 LibraryPlaylist
+PATCH  /v1/me/library/playlists/{id}         {name?, description?}            -> {ok:true}
+DELETE /v1/me/library/playlists/{id}                                          -> {ok:true}
+POST   /v1/me/library/playlists/{id}/tracks  {trackIds}                       -> {ok:true}   (append)
+PUT    /v1/me/library/playlists/{id}/tracks  {trackIds, allowEmpty?}          -> {ok:true}   (replace)
+```
+
+`trackIds` are the **catalog** song ids every read above hands out, so a song can go from a search
+result or an album straight into a playlist with no second lookup. An id that starts with `i.` is
+sent back to Apple as a `library-songs` reference instead — that is how a track with no catalog
+equivalent (uploaded or matched-only) keeps working.
+
+**Reordering and removing a single track are both the PUT.** Apple exposes no "move track" or
+"remove track" operation on a library playlist, so the client sends the complete list in its
+intended order and Apple replaces what it has. Consequences worth knowing before calling it: a
+partial list silently truncates the playlist, so a paginated client must walk every page first;
+and clearing a playlist needs an explicit `"allowEmpty": true` alongside the empty list, which is
+there so a client bug that loses its track list answers with `400 invalid_body` rather than
+wiping the playlist.
+
+**Apple drops ids it can't resolve, without saying so.** Verified live: adding three library
+songs where one was no longer in the catalog answered `200 {"ok":true}` and added the other two.
+A successful write is therefore not a promise that every id landed — re-read the playlist if the
+exact contents matter.
+
+`POST /v1/me/library/playlists` and the appending `POST .../tracks` are **not** retried on a
+transient failure (a retried create makes a second playlist; a retried append duplicates tracks);
+`PATCH`, `PUT` and `DELETE` are idempotent and get the same backoff every read here has. Apple
+refuses an edit to a playlist the account does not own — a subscribed catalog playlist — with
+`403 playlist_not_editable`.
+
 `LibraryPlaylist` adds `canEdit`, `trackCount` and `catalogId` (the catalog playlist id when the
 playlist mirrors one — `hasCatalog`; empty for a purely personal playlist, whose tracks still
 carry their own catalog ids) to the normal playlist shape. Library playlists frequently have no
