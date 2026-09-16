@@ -200,9 +200,64 @@ func (m *Manager) handleEvent(e wrapper.Event) {
 		wasReady := m.state == StateReady
 		m.mu.Unlock()
 		if wasReady {
-			m.setState(StateFailed, "the wrapper daemon exited unexpectedly")
+			// The persisted session (LoggedIn) survives a daemon crash — only the
+			// in-memory process is gone — so this is recoverable without asking
+			// the user to sign in again. go recoverAfterCrash instead of failing
+			// outright; it falls back to StateFailed itself if the daemon won't
+			// come back up.
+			m.setState(StateStarting, "the wrapper daemon exited unexpectedly, reconnecting")
+			go m.recoverAfterCrash()
 		}
 	}
+}
+
+// crashRestartAttempts bounds recoverAfterCrash: a daemon that won't come back
+// after this many tries has a real problem retrying won't fix.
+const crashRestartAttempts = 3
+
+// crashRestartBackoff is the pause between recoverAfterCrash attempts.
+const crashRestartBackoff = 5 * time.Second
+
+// recoverAfterCrash runs in its own goroutine after the wrapper daemon exits
+// while the session was ready. It is not a login: the daemon is simply
+// restarted against the session already on disk, the same thing Autostart
+// does at process boot, so a transient crash resolves itself instead of
+// leaving the user staring at a sign-in form for a session that was never
+// actually lost.
+func (m *Manager) recoverAfterCrash() {
+	if !m.LoggedIn() {
+		return
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= crashRestartAttempts; attempt++ {
+		m.mu.Lock()
+		loginActive := m.loginActive
+		m.mu.Unlock()
+		if loginActive {
+			// A real Login()/Submit2FA() call now owns the state machine;
+			// stepping on it here would race the daemon it just started.
+			return
+		}
+
+		ctx := context.Background()
+		if err := m.sup.Start(ctx, nil); err != nil {
+			lastErr = err
+		} else if err := m.sup.WaitListening(ctx, readyTimeout); err != nil {
+			lastErr = err
+		} else {
+			m.setState(StateReady, "")
+			slog.Info("wrapper daemon recovered after unexpected exit", "attempt", attempt)
+			return
+		}
+
+		if attempt < crashRestartAttempts {
+			time.Sleep(crashRestartBackoff)
+		}
+	}
+
+	m.setState(StateFailed, fmt.Sprintf(
+		"the wrapper daemon exited unexpectedly and could not be restarted: %v", lastErr))
 }
 
 // Autostart brings the daemon up when a session already exists. It is a no-op

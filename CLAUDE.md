@@ -19,8 +19,18 @@ Music tab that talks to this API — see `elbert/CLAUDE.md`'s "Apple Music (Orch
 `elbert/lib/services/orchard_service.dart` for the client-side shape every response below maps to.
 When changing a response shape here, that file needs the matching update.
 
-- Not a git repository (no `.git`) — there is no commit history to consult; this file and
-  [docs/reference.md](docs/reference.md) are the record of *why*, not `git log`.
+- A git repository (`evolvedmesh/orchard`), but a young one whose commits are coarse feature
+  drops — this file and [docs/reference.md](docs/reference.md) remain the record of *why*, since
+  `git log` will rarely explain a decision. Work happens on `mvp`; `main`/`dev` do not yet carry
+  the server code.
+- **Commit before bundling.** Elbert ships this source inside its app
+  (`elbert/tool/fetch_orchard_src.sh` → `assets/orchard/orchard-src.tar.gz`), and with
+  `ORCHARD_SRC_DIR` it tars a local checkout's **working tree**, uncommitted changes included.
+  Elbert's release CI always bundles a clean checkout of `mvp`, so anything not committed here
+  exists only on the machine that built the local tarball — which is how the daemon crash-recovery
+  below came within one `git reset` of being lost. If you patch a running managed container by
+  copying files into `~/.local/share/com.evolvedmesh.elbert/orchard/src`, commit the same change
+  here in the same sitting.
 - Single-tenant: one API key, one Apple session, no user accounts. Every DB row is unscoped.
 - The daemon is Linux `amd64`/`arm64` only — no build for anything else. The *host* can be Linux,
   macOS or Windows: on macOS and Windows the daemon runs unchanged inside Docker Desktop's Linux
@@ -159,6 +169,15 @@ Two packages, two concerns, one lifecycle:
   behind. After a successful login, `finishLogin()` restarts the daemon **without** credentials —
   this is the whole mitigation for credentials being visible on argv (`/proc/<pid>/cmdline`) during
   `-L`.
+  **A daemon that dies while the session was `ready` no longer fails the session outright.** The
+  persisted session survives the process — only the daemon is gone — so `EventExited` moves to
+  `starting` and hands off to `recoverAfterCrash`, which restarts the daemon against the session
+  already on disk (exactly what `Autostart` does at boot), three attempts, 5 s apart, falling back
+  to `failed` with the last error if it won't come up. It bails out the moment `loginActive` is
+  set, so it can never race a real `Login()`/`Submit2FA()` that has taken over the state machine.
+  Without this a transient crash left the user staring at a sign-in form for a session that was
+  never actually lost — elbert's `appleMusicStatusProvider` still restarts the container on the
+  first `failed` status as a second line of defence.
 - **`apple/account.go`** — `Account()` caches the daemon's dev/media-user tokens for 5 minutes and
   adapts them to `catalog.TokenSource` via `CatalogTokens()`. Never log either token.
 

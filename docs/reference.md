@@ -135,6 +135,12 @@ DELETE /v1/apple/session     log out and wipe the stored session
 Read `state` from the body rather than relying on the HTTP status: `login` returns 200 with
 `state: awaiting_2fa` when Apple wants a code, and 502 with the failure detail when it does not.
 
+A daemon that dies while the session was `ready` shows `starting` ("the wrapper daemon exited
+unexpectedly, reconnecting"), not `failed`: the session is persisted, so Orchard restarts the
+daemon against it — three attempts, 5 s apart — and only reports `failed` if it will not come
+back. So a `failed` here means the session genuinely needs attention, and a client polling
+`status` should let a `starting` run its course rather than prompting for sign-in.
+
 ### Catalog
 
 ```text
