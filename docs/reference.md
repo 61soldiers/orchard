@@ -281,6 +281,72 @@ Fetch the full resource by `id`/`type` through the catalog endpoints above — `
 /v1/songs/{id}` for `songs`. A `stations` item is played through `POST
 /v1/stations/{id}/next-tracks`, below.
 
+### Replay (listening summaries)
+
+```text
+GET /v1/me/summaries                       -> {summaries:[...], latestYear, isEndOfYear}
+GET /v1/me/summaries?period=month&year=YYYY-> {summaries:[...]}
+GET /v1/me/summaries/{id}                  -> one summary with every ranking
+```
+
+This is Apple Music **Replay** — the same data `music.apple.com/replay` renders. It is Apple's
+own tally across every device the account plays on, which is why it is worth proxying instead of
+a client counting its own plays: those two numbers answer different questions and should never be
+added together.
+
+`/v1/me/music-summaries` is not part of MusicKit's documented surface; like
+[`/v1/me/library/pins`](#library) it was found by probing a live account, so treat the shapes as
+observed. Two of Apple's quirks are enforced server-side rather than passed through as a 400:
+`period=month` **requires** `year`, and `period=year` must not carry one. Anything but `year` or
+`month` is a `400 invalid_query`.
+
+A summary `id` is `"year-2025"` or `"month-2026-8"`. The listing carries each period's totals
+only; the rankings come from the per-id call, which fetches all of Apple's views in one request
+and hydrates every ranked row's catalog resource inline (`include[*-period-summaries]` plus
+`fields[]` narrowing — without them a 100-row leaderboard would be 100 bare ids and 100 follow-up
+lookups).
+
+```json
+{ "id": "year-2025", "period": "year", "name": "2025", "year": 2025,
+  "listenTimeInMinutes": 22208, "uniqueSongCount": 2003, "uniqueAlbumCount": 187,
+  "uniqueArtistCount": 848, "uniqueGenreCount": 39, "uniquePlaylistCount": 7,
+  "uniqueStationCount": 15,
+  "playlistId": "pl.rp-wPOPtxYDByx", "playlistName": "Replay Your Top Songs of 2025",
+  "topSongs": [ { "playCount": 148, "firstPlayed": "...", "lastPlayed": "...",
+                  "name": "I Told You Things",
+                  "item": { "id": "1773474484", "type": "songs", "name": "I Told You Things",
+                            "artistName": "Gracie Abrams", "albumName": "The Secret of Us (Deluxe)",
+                            "durationMs": 221207, "artwork": {...} } } ],
+  "topArtists": [...], "topAlbums": [...], "topGenres": [...],
+  "topPlaylists": [...], "topStations": [...],
+  "milestones": [ { "id": "year-2025-listen-time-minutes-10000", "kind": "listen-time",
+                    "value": "10000", "dateReached": "2025-07-31", "status": "achieved",
+                    "listenTimeInMinutes": 10467,
+                    "artworkLight": "...{w}x{h}...{f}...", "artworkDark": "..." } ] }
+```
+
+Three things about the numbers are load-bearing for anything rendering them:
+
+- **Songs have no listen time.** Apple reports `listenTimeInMinutes` for albums, artists, genres,
+  playlists and stations, and only `playCount` for songs. That zero is passed through rather than
+  synthesised from `durationMs × playCount`, which would be a guess presented as Apple's figure.
+- **The current year has no totals yet.** Apple computes a year's aggregate at the end of it, so
+  the in-progress year comes back with `listenTimeInMinutes: 0` and no `unique*Count`, while
+  still carrying `topSongs`/`topAlbums`/`topArtists` and `milestones`. Its *months* have full
+  totals — a client wanting "this year so far" sums those, and should say that is what it did.
+- **Genre rows have no resource.** A genre is not a catalog item, so those entries carry `name`
+  and the counts with no `item`. Every entry carries `name` whatever its kind, so a client never
+  has to branch on `item` being null just to draw a label.
+
+Milestone artwork is Apple's generated badge image and comes as a light/dark pair. Its URL
+template has a `{f}` format placeholder alongside the usual `{w}`/`{h}`; `png`, `jpg` and `webp`
+all serve. The badge has a real alpha channel, so `png` is the one that composites onto a page
+background — at 600×600 that is ~390 KB against ~70 KB for the opaque `jpg`, which is the trade a
+client is making when it picks.
+
+`playlistId` is the catalog id of Apple's generated "Replay Your Top Songs of <year>" playlist,
+playable and downloadable like any other playlist.
+
 ### Stations
 
 ```text

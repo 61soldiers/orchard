@@ -219,6 +219,25 @@ type-agnostic (one `rawPinAttrs` covering every pinnable type, absent fields sim
 rather than modelled on the one case we can see. It resolves to catalog ids the same way the
 `Library*` methods do; keep the `Pin` shape in sync with elbert's `OrchardPin`.
 
+`Summaries`/`Summary` ([internal/catalog/summaries.go](internal/catalog/summaries.go)) read
+`/v1/me/music-summaries` — Apple Music **Replay**, the tally behind `music.apple.com/replay`.
+Another undocumented amp-api endpoint found by probing, same caveat as `Pins`. It is worth
+proxying precisely because it is *Apple's* count across every device the account plays on, which
+is a different number from anything a single client could tally itself — the two must never be
+added together. Three shapes in the response are easy to get wrong and are documented on the
+types: **songs carry `playCount` but no `listenTimeInMinutes`** (albums/artists/genres/playlists/
+stations carry both), and that zero is passed through rather than synthesised from
+`durationMs × playCount`, which would present a guess as Apple's figure; **the in-progress year
+has no totals at all** (`listenTimeInMinutes: 0`, no `unique*Count`) because Apple computes a
+year's aggregate at year end, though its *months* are complete and its `top*` views populated;
+and **genre rows have no catalog resource**, so `SummaryEntry.Name` is set for every kind and a
+client never branches on `Item` being nil just to draw a label. Apple rejects `period=month`
+without a `year` and `period=year` with one, so `Summaries` enforces the pairing rather than
+letting a 400 through. The per-id call asks for every view at once and hydrates each ranked row
+inline (`include[*-period-summaries]` + `fields[]` narrowing) — a 100-row leaderboard of bare ids
+would otherwise cost 100 follow-up lookups. Keep `Summary`/`SummaryEntry` in sync with elbert's
+`OrchardSummary`.
+
 `Library*` reads the account's *own* added music and playlists (`/v1/me/library/...`, not
 storefront-scoped). Apple's library ids (`i.*`/`l.*`/`p.*`) are useless to the stream/download
 pipeline, so every item is resolved to its catalog resource via `include=catalog` (fallback:
@@ -506,6 +525,7 @@ budget, not Apple's.
 | `catalog.go`     | `/v1/storefront`, `/v1/search`, `/v1/albums,artists,playlists,songs/{id}...`, `/v1/stations/{id}/next-tracks` |
 | `personal.go`    | `/v1/me/recommendations`, `/v1/me/recent/played`, `/v1/me/play-activity`      |
 | `library_me.go`  | `/v1/me/library/{playlists,playlists/{id},songs,albums,artists,pins}`         |
+| `summaries.go`   | `/v1/me/summaries`, `/v1/me/summaries/{id}` — Apple Music Replay              |
 | `stream.go`      | `/v1/songs/{id}/variants`, `/v1/songs/{id}/stream`                            |
 | `downloads.go`   | `/v1/downloads*`, `/v1/tracks/{id}/file`, `/v1/library/*` (phase 5 queries)   |
 | `errors.go`      | `writeError`/`writeJSON`/`decodeJSON` — the only place responses get built    |
