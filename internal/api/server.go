@@ -97,6 +97,8 @@ func (s *Server) routes() chi.Router {
 		r.Get("/charts", s.handleCharts)
 		r.Get("/browse", s.handleBrowse)
 
+		r.Get("/me/summaries", s.handleSummaries)
+		r.Get("/me/summaries/{id}", s.handleSummary)
 		r.Get("/me/recommendations", s.handleRecommendations)
 		r.Get("/me/recent/played", s.handleRecentlyPlayed)
 		r.Post("/me/play-activity", s.handlePlayActivity)
