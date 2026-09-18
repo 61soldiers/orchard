@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -72,12 +73,27 @@ func (s *Server) handleLibraryPlaylistTracksMe(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"songs": songs, "nextCursor": next})
 }
 
+// libraryOptionsFrom reads the optional `limit` (page size) and `sort=recent`
+// (newest added first) query parameters. `sort` only matters on the first
+// request, since the cursor carries it on; `limit` must be repeated on every
+// request, because Apple drops it from its `next` links.
+func libraryOptionsFrom(r *http.Request) []catalog.LibraryOption {
+	var opts []catalog.LibraryOption
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
+		opts = append(opts, catalog.WithLibraryLimit(n))
+	}
+	if r.URL.Query().Get("sort") == "recent" {
+		opts = append(opts, catalog.WithLibraryRecent())
+	}
+	return opts
+}
+
 func (s *Server) handleLibrarySongsMe(w http.ResponseWriter, r *http.Request) {
 	if !s.appleReady(w) {
 		return
 	}
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
-	songs, next, err := s.catalog.LibrarySongs(r.Context(), cursor)
+	songs, next, err := s.catalog.LibrarySongs(r.Context(), cursor, libraryOptionsFrom(r)...)
 	if err != nil {
 		s.catalogError(w, r, err)
 		return
@@ -93,7 +109,7 @@ func (s *Server) handleLibraryAlbumsMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
-	albums, next, err := s.catalog.LibraryAlbums(r.Context(), cursor)
+	albums, next, err := s.catalog.LibraryAlbums(r.Context(), cursor, libraryOptionsFrom(r)...)
 	if err != nil {
 		s.catalogError(w, r, err)
 		return

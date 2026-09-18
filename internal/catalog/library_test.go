@@ -143,3 +143,31 @@ func TestLibrarySongsRejectsInvalidCursor(t *testing.T) {
 		t.Errorf("LibrarySongs with a bad cursor: err = %v, want ErrInvalidCursor", err)
 	}
 }
+
+func TestLibraryQueryOptions(t *testing.T) {
+	q := libraryQuery()
+	if q.Get("limit") != "100" || q.Get("sort") != "" {
+		t.Fatalf("default query = %v, want limit=100 and no sort", q)
+	}
+	q = libraryQuery(WithLibraryLimit(24), WithLibraryRecent())
+	if q.Get("limit") != "24" || q.Get("sort") != "-dateAdded" {
+		t.Fatalf("tuned query = %v, want limit=24 sort=-dateAdded", q)
+	}
+	// Out-of-range limits fall back to the default rather than reaching Apple.
+	for _, n := range []int{0, -3, 101} {
+		if got := libraryQuery(WithLibraryLimit(n)).Get("limit"); got != "100" {
+			t.Errorf("limit %d produced %q, want 100", n, got)
+		}
+	}
+}
+
+func TestWithQueryParam(t *testing.T) {
+	got := withQueryParam("/v1/me/library/albums?offset=12&sort=-dateAdded", "limit", "12")
+	want := "/v1/me/library/albums?limit=12&offset=12&sort=-dateAdded"
+	if got != want {
+		t.Fatalf("withQueryParam = %q, want %q", got, want)
+	}
+	if got := withQueryParam("/v1/me/library/albums", "limit", "5"); got != "/v1/me/library/albums?limit=5" {
+		t.Fatalf("no-query path = %q", got)
+	}
+}

@@ -423,11 +423,17 @@ which is Orchard's index of files it has *downloaded*.
 GET /v1/me/library/playlists?cursor=              -> {playlists:[LibraryPlaylist], nextCursor}  (no tracks)
 GET /v1/me/library/playlists/{id}                 -> LibraryPlaylist + first page of tracks, tracksNextCursor if more
 GET /v1/me/library/playlists/{id}/tracks?cursor=  -> {songs, nextCursor}
-GET /v1/me/library/songs?cursor=                  -> {songs:[Song], nextCursor}
-GET /v1/me/library/albums?cursor=                 -> {albums:[Album], nextCursor}                (no tracks)
+GET /v1/me/library/songs?cursor=&limit=&sort=     -> {songs:[Song], nextCursor}
+GET /v1/me/library/albums?cursor=&limit=&sort=    -> {albums:[Album], nextCursor}                (no tracks)
 GET /v1/me/library/artists?cursor=                -> {artists:[Artist], nextCursor}              (name + artwork only)
 GET /v1/me/library/pins                           -> {pins:[Pin]}
 ```
+
+`songs` and `albums` take two optional parameters: `sort=recent` (newest added first —
+`sort=-dateAdded` upstream; alphabetical without it) and `limit` (page size, 1–100, default 100).
+`sort` only matters on the first request, since the `nextCursor` carries it on. `limit` must be sent
+on **every** request, cursor ones included: Apple drops it from its own `next` links, so a page after
+the first would otherwise fall back to Apple's default size.
 
 Apple's library resources have their own id space (`i.*` songs, `l.*` albums, `p.*` playlists)
 that the stream/download pipeline does not accept. Every item here is resolved to its **catalog**

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // The Apple Music *library* endpoints (`/v1/me/library/...`) are the signed-in
@@ -82,24 +83,70 @@ type rawLibraryResource struct {
 	} `json:"relationships"`
 }
 
-func libraryQuery() url.Values {
-	return url.Values{
-		"limit":   {strconv.Itoa(libraryPageLimit)},
+func libraryQuery(opts ...LibraryOption) url.Values {
+	o := newLibraryOptions(opts)
+	q := url.Values{
+		"limit":   {strconv.Itoa(o.limit)},
 		"include": {"catalog"},
 	}
+	if o.recent {
+		q.Set("sort", "-dateAdded")
+	}
+	return q
+}
+
+type libraryOptions struct {
+	limit  int
+	recent bool
+}
+
+func newLibraryOptions(opts []LibraryOption) libraryOptions {
+	o := libraryOptions{limit: libraryPageLimit}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// LibraryOption tunes a library list request. The sort only matters on the
+// first request — Apple's `next` link carries it from there — but Apple drops
+// the page size from every `next` link, so a caller wanting a non-default
+// limit passes it on every request and libraryPage applies it to the
+// continuation too.
+type LibraryOption func(*libraryOptions)
+
+// WithLibraryLimit asks for n items per page instead of the default
+// (libraryPageLimit, which is also Apple's maximum). Values outside 1..
+// libraryPageLimit are ignored.
+func WithLibraryLimit(n int) LibraryOption {
+	return func(o *libraryOptions) {
+		if n >= 1 && n <= libraryPageLimit {
+			o.limit = n
+		}
+	}
+}
+
+// WithLibraryRecent orders the list newest-added first. Without it Apple
+// returns a library list alphabetically, which is right for a "Songs" list
+// and wrong for anything called "Recently Added".
+func WithLibraryRecent() LibraryOption {
+	return func(o *libraryOptions) { o.recent = true }
 }
 
 // libraryPage fetches exactly one page from a `/v1/me/library/...` list and
 // calls visit for every item on it. cursor, when non-empty, must be exactly
 // the nextCursor a previous call on the same list returned; an empty cursor
 // fetches the first page.
-func (c *Client) libraryPage(ctx context.Context, start, cursor string, visit func(rawLibraryResource)) (next string, err error) {
-	path, q := start, libraryQuery()
+func (c *Client) libraryPage(ctx context.Context, start, cursor string, visit func(rawLibraryResource), opts ...LibraryOption) (next string, err error) {
+	path, q := start, libraryQuery(opts...)
 	if cursor != "" {
 		if !validCursor(cursor) {
 			return "", ErrInvalidCursor
 		}
 		path, q = cursor, nil
+		if limit := newLibraryOptions(opts).limit; limit != libraryPageLimit {
+			path = withQueryParam(cursor, "limit", strconv.Itoa(limit))
+		}
 	}
 	var resp struct {
 		Data []rawLibraryResource `json:"data"`
@@ -112,6 +159,17 @@ func (c *Client) libraryPage(ctx context.Context, start, cursor string, visit fu
 		visit(d)
 	}
 	return resp.Next, nil
+}
+
+// withQueryParam sets key on the query string of a relative path.
+func withQueryParam(path, key, value string) string {
+	base, rawQuery, _ := strings.Cut(path, "?")
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return path
+	}
+	q.Set(key, value)
+	return base + "?" + q.Encode()
 }
 
 // LibraryPlaylists returns one page of the account's library playlists
@@ -189,13 +247,13 @@ func (c *Client) LibraryPlaylistTracks(ctx context.Context, id, cursor string) (
 
 // LibrarySongs returns one page of the account's added songs, as catalog
 // Songs. cursor is empty for the first page.
-func (c *Client) LibrarySongs(ctx context.Context, cursor string) ([]Song, string, error) {
+func (c *Client) LibrarySongs(ctx context.Context, cursor string, opts ...LibraryOption) ([]Song, string, error) {
 	var out []Song
 	next, err := c.libraryPage(ctx, "/v1/me/library/songs", cursor, func(d rawLibraryResource) {
 		if s, ok := librarySong(d); ok {
 			out = append(out, s)
 		}
-	})
+	}, opts...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -204,13 +262,13 @@ func (c *Client) LibrarySongs(ctx context.Context, cursor string) ([]Song, strin
 
 // LibraryAlbums returns one page of the account's added albums, as catalog
 // Albums (no tracks). cursor is empty for the first page.
-func (c *Client) LibraryAlbums(ctx context.Context, cursor string) ([]Album, string, error) {
+func (c *Client) LibraryAlbums(ctx context.Context, cursor string, opts ...LibraryOption) ([]Album, string, error) {
 	var out []Album
 	next, err := c.libraryPage(ctx, "/v1/me/library/albums", cursor, func(d rawLibraryResource) {
 		if a, ok := libraryAlbum(d); ok {
 			out = append(out, a)
 		}
-	})
+	}, opts...)
 	if err != nil {
 		return nil, "", err
 	}
