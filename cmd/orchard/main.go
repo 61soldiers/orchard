@@ -45,6 +45,7 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	watchParent()
 
 	st, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
@@ -115,6 +116,7 @@ func run() error {
 	wpClient := webplayback.New()
 	downloads := download.New(st, streamClient, catalogClient, appleMgr.CatalogTokens, wpClient, download.Config{
 		LibraryDir: cfg.LibraryDir,
+		FFmpegPath: cfg.FFmpegPath,
 	})
 	go downloads.Run(ctx)
 

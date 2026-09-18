@@ -47,6 +47,10 @@ type Config struct {
 	WrapperDeviceInfo                           string
 	WrapperProxy                                string
 
+	// FFmpegPath is the ffmpeg the download pipeline remuxes with. The default
+	// finds it on PATH; a host that bundles its own (Android) points it here.
+	FFmpegPath string
+
 	LogLevel slog.Level
 
 	// TrustProxyHeaders enables X-Forwarded-For/X-Real-IP parsing. Only turn it
@@ -98,6 +102,7 @@ func Parse(args []string, output io.Writer) (*Config, error) {
 		m3u8Port     = fs.Int("wrapper-m3u8-port", envInt("ORCHARD_WRAPPER_M3U8_PORT", 20020), "wrapper manifest port (ORCHARD_WRAPPER_M3U8_PORT)")
 		accountPort  = fs.Int("wrapper-account-port", envInt("ORCHARD_WRAPPER_ACCOUNT_PORT", 30020), "wrapper account-info port (ORCHARD_WRAPPER_ACCOUNT_PORT)")
 		keyPort      = fs.Int("wrapper-key-port", envInt("ORCHARD_WRAPPER_KEY_PORT", 40020), "wrapper key-template port (ORCHARD_WRAPPER_KEY_PORT)")
+		ffmpegPath   = fs.String("ffmpeg", env("ORCHARD_FFMPEG", "ffmpeg"), "ffmpeg binary the download pipeline remuxes with (ORCHARD_FFMPEG)")
 		deviceInfo   = fs.String("wrapper-device-info", env("ORCHARD_WRAPPER_DEVICE_INFO", ""), "override the wrapper -I device string (ORCHARD_WRAPPER_DEVICE_INFO)")
 		wrapperProxy = fs.String("wrapper-proxy", env("ORCHARD_WRAPPER_PROXY", ""), "proxy for the wrapper daemon, e.g. socks5://host:port (ORCHARD_WRAPPER_PROXY)")
 	)
@@ -148,6 +153,7 @@ func Parse(args []string, output io.Writer) (*Config, error) {
 		DecryptPort:       *decryptPort,
 		M3U8Port:          *m3u8Port,
 		AccountPort:       *accountPort,
+		FFmpegPath:        strings.TrimSpace(*ffmpegPath),
 		KeyPort:           *keyPort,
 		WrapperDeviceInfo: strings.TrimSpace(*deviceInfo),
 		WrapperProxy:      strings.TrimSpace(*wrapperProxy),

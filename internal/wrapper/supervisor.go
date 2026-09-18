@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -90,6 +89,11 @@ type Supervisor struct {
 	// earlier) have no key-template service: they abort argument parsing on an
 	// unknown -K and never print "listening key request on". Guarded by mu.
 	keyPort bool
+
+	// gen identifies the current daemon. Start and Stop both bump it, so the
+	// goroutine watching a process can tell whether its exit is still news —
+	// see the comment in Start. Guarded by mu.
+	gen uint64
 }
 
 // NewSupervisor returns a Supervisor. onEvent is called from a background
@@ -120,7 +124,7 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 		return fmt.Errorf("wrapper is not installed (state %s)", info.State)
 	}
 
-	keyPort := wrapperHasKeyPort(info.BinPath)
+	keyPort := keyPortSupported(info)
 	s.mu.Lock()
 	s.keyPort = keyPort
 	s.mu.Unlock()
@@ -154,27 +158,7 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 		args = append(args, "-L", login.AppleID+":"+login.Password, "-F")
 	}
 
-	cmd := exec.Command(info.BinPath, args...)
-	cmd.Dir = s.prov.Dir() // load-bearing: wrapper does chroot("./rootfs")
-	cmd.Env = append(os.Environ(), "HOME="+s.prov.Dir())
-
-	// The published release already sandboxes itself with
-	// unshare(CLONE_NEWUSER|NEWNS|NEWPID), but a build from wrapper.c would not,
-	// and would then need CAP_SYS_ADMIN. Creating the namespace here makes either
-	// build work as a non-root user, and CLONE_NEWPID plus Pdeathsig guarantees
-	// the whole tree dies with Orchard rather than leaving an authenticated
-	// daemon listening.
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID,
-		UidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getuid(), Size: 1},
-		},
-		GidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
-		},
-		GidMappingsEnableSetgroups: false,
-		Pdeathsig:                  syscall.SIGKILL,
-	}
+	cmd := daemonCommand(s.prov.Dir(), info, args)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -188,17 +172,34 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 
 	done := make(chan struct{})
 	s.mu.Lock()
+	s.gen++
+	gen := s.gen
 	s.cmd, s.done, s.running = cmd, done, true
 	s.mu.Unlock()
 
 	go s.scan(stderr)
 	go func() {
 		err := cmd.Wait()
+		// Only the daemon this supervisor still considers current gets to report
+		// its exit. A Stop() — including the one Start() does to replace a
+		// running daemon — bumps the generation before signalling, so the kill it
+		// asked for can never be mistaken for a crash. That mattered because the
+		// exit is observed here, asynchronously, and Stop() returns as soon as
+		// the process is gone: the event could otherwise land *after* the
+		// replacement daemon had already come up and reported ready, and be read
+		// as that healthy daemon crashing. finishLogin (restart without
+		// credentials, straight after 2FA) hits exactly that window, and the
+		// bogus recovery then killed the daemon that had just signed in.
 		s.mu.Lock()
-		s.running = false
+		current := s.gen == gen
+		if current {
+			s.running = false
+		}
 		s.mu.Unlock()
 		close(done)
-		s.emit(Event{Kind: EventExited, Err: err})
+		if current {
+			s.emit(Event{Kind: EventExited, Err: err})
+		}
 	}()
 
 	slog.Info("wrapper started", "pid", cmd.Process.Pid, "login", login != nil)
@@ -209,15 +210,21 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 func (s *Supervisor) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	cmd, done, running := s.cmd, s.done, s.running
+	if running && cmd != nil && cmd.Process != nil {
+		// Retire this generation before signalling, so the exit that follows is
+		// recognised as ours rather than reported as a crash.
+		s.gen++
+	}
 	s.mu.Unlock()
 
 	if !running || cmd == nil || cmd.Process == nil {
 		return nil
 	}
 
-	// The child is PID 1 of its own namespace, so killing it tears down every
-	// descendant. It installs a SIGINT handler, so that arrives; SIGKILL from
-	// this ancestor namespace always works if it does not.
+	// On desktop the child is PID 1 of its own namespace, and on Android it is
+	// proot running with --kill-on-exit, so either way killing it tears down
+	// every descendant. It installs a SIGINT handler, so that arrives; SIGKILL
+	// always works if it does not.
 	pid := cmd.Process.Pid
 	_ = syscall.Kill(pid, syscall.SIGINT)
 
@@ -237,7 +244,9 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	s.cmd, s.done = nil, nil
+	// The exiting goroutine no longer clears this: its generation was retired
+	// above, so marking the daemon stopped is this caller's job.
+	s.cmd, s.done, s.running = nil, nil, false
 	s.mu.Unlock()
 	return nil
 }

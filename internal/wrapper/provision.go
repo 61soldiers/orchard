@@ -107,6 +107,9 @@ func (p *Provisioner) setInfo(i ProvisionInfo) {
 // Detect reports the on-disk install state without touching the network. Use
 // it when auto-provisioning is disabled.
 func (p *Provisioner) Detect() error {
+	if handled, err := p.platformProvision(); handled {
+		return err
+	}
 	m, bin, ok := p.installed()
 	if !ok {
 		p.setInfo(ProvisionInfo{State: ProvisionAbsent})
@@ -122,6 +125,9 @@ func (p *Provisioner) Detect() error {
 // Ensure installs the wrapper release if it is missing or does not match the
 // pinned tag/digest. It is safe to call on every start.
 func (p *Provisioner) Ensure(ctx context.Context) error {
+	if handled, err := p.platformProvision(); handled {
+		return err
+	}
 	if _, _, err := archRelease(runtime.GOARCH); err != nil && p.opts.URL == "" {
 		p.setInfo(ProvisionInfo{State: ProvisionUnsupported, Error: err.Error()})
 		return err
