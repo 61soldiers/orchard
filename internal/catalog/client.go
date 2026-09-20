@@ -531,7 +531,47 @@ func (c *Client) Lyrics(ctx context.Context, id string) (*Lyrics, error) {
 	if lrc, level, err := ttmlToLRC(lyrics.TTML); err == nil {
 		lyrics.LRC, lyrics.SyncLevel = lrc, level
 	}
+
+	// /lyrics only ever carries line timing — word timing is a separate
+	// resource, /syllable-lyrics, which Apple's own clients read for the
+	// karaoke view. Ask for it whenever the plain document stopped short of
+	// word level; a song without it simply keeps what it has.
+	if lyrics.SyncLevel != SyncWord {
+		if ttml, err := c.syllableTTML(ctx, sf, id); err == nil {
+			if lrc, level, err := ttmlToLRC(ttml); err == nil && level == SyncWord {
+				lyrics.TTML, lyrics.LRC, lyrics.SyncLevel = ttml, lrc, level
+			}
+		}
+	}
 	return lyrics, nil
+}
+
+// syllableTTML fetches the word-timed TTML for a song. Apple has returned the
+// document under both `ttml` and `ttmlLocalizations`, so either is accepted.
+func (c *Client) syllableTTML(ctx context.Context, storefront, id string) (string, error) {
+	var out struct {
+		Data []struct {
+			Attributes struct {
+				TTML              string `json:"ttml"`
+				TTMLLocalizations string `json:"ttmlLocalizations"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	path := "/v1/catalog/" + storefront + "/songs/" + url.PathEscape(id) + "/syllable-lyrics"
+	if err := c.get(ctx, path, nil, &out); err != nil {
+		return "", err
+	}
+	if len(out.Data) == 0 {
+		return "", ErrNotFound
+	}
+	a := out.Data[0].Attributes
+	if a.TTML != "" {
+		return a.TTML, nil
+	}
+	if a.TTMLLocalizations != "" {
+		return a.TTMLLocalizations, nil
+	}
+	return "", ErrNotFound
 }
 
 // Recommendations returns Apple's "Made For You" personalization: named

@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Sync levels, in the order a caller should prefer them: word-by-word beats
@@ -73,7 +76,7 @@ func ttmlToLRC(raw string) (lrc string, syncLevel string, err error) {
 
 	switch strings.ToLower(doc.Timing) {
 	case "word":
-		if out, ok := wordLevelLRC(lines); ok {
+		if out, ok := wordLevelLRC(raw); ok {
 			return out, SyncWord, nil
 		}
 		fallthrough
@@ -88,55 +91,197 @@ func ttmlToLRC(raw string) (lrc string, syncLevel string, err error) {
 }
 
 // wordLevelLRC emits the informal "enhanced LRC" shape,
-// `[00:08.789]<00:08.789>Hello <00:09.100>world`, one inline `<time>` tag per
-// word ahead of a line-level `[time]` tag. Apple's own inter-word spacing is
-// ignored in favour of a single space between words, both because it's
-// inconsistent in practice and because it keeps the plain-text fallback (an
-// LRC-unaware reader just stripping `<...>` tags) correctly spaced.
-func wordLevelLRC(lines []ttmlP) (string, bool) {
-	type word struct {
-		ms   int
-		text string
+// `[00:08.789]<00:08.789>Hello <00:09.100>world<00:09.700>`: a line-level
+// `[time]` tag, then one inline `<time>` tag per word, and a closing tag where
+// the last word ends.
+//
+// Spacing is taken from the document, not normalised. Apple splits a sung
+// word into syllable spans ("Hel" "lo") that have no whitespace between them,
+// and the client needs to know which neighbours are glued to render "Hello"
+// rather than "Hel lo" — a plain reader stripping `<...>` tags still gets the
+// right text either way.
+//
+// Backing vocals (`ttm:role="x-bg"`) are timed on top of the main line, so
+// folding them in would make the tags run backwards. They become a line of
+// their own instead, and lines are emitted in time order.
+func wordLevelLRC(raw string) (string, bool) {
+	lines := parseSyllableLines(raw)
+	if len(lines) == 0 {
+		return "", false
 	}
+	sort.SliceStable(lines, func(i, j int) bool { return lines[i][0].start < lines[j][0].start })
 
 	var b strings.Builder
-	wrote := false
-	for _, p := range lines {
-		if len(p.Spans) == 0 {
-			continue
-		}
-		var words []word
-		for _, s := range p.Spans {
-			text := strings.TrimSpace(s.Text)
-			if text == "" {
-				continue
-			}
-			ms, ok := parseTTMLTime(s.Begin)
-			if !ok {
-				continue
-			}
-			words = append(words, word{ms: ms, text: text})
-		}
-		if len(words) == 0 {
-			continue
-		}
-
-		lineStart := words[0].ms
-		if v, ok := parseTTMLTime(p.Begin); ok {
-			lineStart = v
-		}
-
-		fmt.Fprintf(&b, "[%s]", formatLRCTime(lineStart))
+	for _, words := range lines {
+		fmt.Fprintf(&b, "[%s]", formatLRCTime(words[0].start))
 		for i, w := range words {
-			if i > 0 {
+			if i > 0 && w.spaceBefore {
 				b.WriteByte(' ')
 			}
-			fmt.Fprintf(&b, "<%s>%s", formatLRCTime(w.ms), w.text)
+			fmt.Fprintf(&b, "<%s>%s", formatLRCTime(w.start), w.text)
+		}
+		if last := words[len(words)-1]; last.end > last.start {
+			fmt.Fprintf(&b, "<%s>", formatLRCTime(last.end))
 		}
 		b.WriteByte('\n')
-		wrote = true
 	}
-	return b.String(), wrote
+	return b.String(), true
+}
+
+type syllable struct {
+	start, end  int
+	text        string
+	spaceBefore bool
+}
+
+// spanKind describes one open <span> while walking the document.
+type spanKind struct {
+	timed      bool
+	start, end int
+	bg         bool // backing vocal
+	skip       bool // translation / transliteration, not the sung words
+}
+
+// lineBuf collects one line's words, remembering whether whitespace has been
+// seen since the last one so the next word knows if it is glued on.
+type lineBuf struct {
+	words []syllable
+	space bool
+}
+
+func (l *lineBuf) add(s syllable) {
+	s.spaceBefore = s.spaceBefore || l.space
+	l.space = false
+	l.words = append(l.words, s)
+}
+
+// parseSyllableLines walks a word-timed TTML document and returns each sung
+// line as its timed words. A <p> yields one line for its main vocal and, when
+// it has backing vocals, a second for those.
+func parseSyllableLines(raw string) [][]syllable {
+	dec := xml.NewDecoder(strings.NewReader(raw))
+	dec.Strict = false
+
+	var (
+		out      [][]syllable
+		inP      bool
+		main, bg lineBuf
+		stack    []spanKind
+	)
+	flush := func() {
+		if len(main.words) > 0 {
+			out = append(out, main.words)
+		}
+		if len(bg.words) > 0 {
+			out = append(out, bg.words)
+		}
+		main, bg, stack = lineBuf{}, lineBuf{}, nil
+	}
+
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "p":
+				flush()
+				inP = true
+			case "span":
+				if !inP {
+					continue
+				}
+				k := spanKind{}
+				var begin, end string
+				for _, a := range t.Attr {
+					switch a.Name.Local {
+					case "begin":
+						begin = a.Value
+					case "end":
+						end = a.Value
+					case "role":
+						switch a.Value {
+						case "x-bg":
+							k.bg = true
+						case "x-translation", "x-roman":
+							k.skip = true
+						}
+					}
+				}
+				if ms, ok := parseTTMLTime(begin); ok {
+					k.timed, k.start, k.end = true, ms, ms
+					if e, ok := parseTTMLTime(end); ok && e > ms {
+						k.end = e
+					}
+				}
+				stack = append(stack, k)
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "p":
+				flush()
+				inP = false
+			case "span":
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
+			}
+		case xml.CharData:
+			if !inP {
+				continue
+			}
+			var isBG, skip bool
+			var word *spanKind
+			for i := range stack {
+				isBG = isBG || stack[i].bg
+				skip = skip || stack[i].skip
+				if stack[i].timed {
+					word = &stack[i]
+				}
+			}
+			if skip {
+				continue
+			}
+			buf := &main
+			if isBG {
+				buf = &bg
+			}
+			text := string(t)
+			text2 := collapseWhitespace(text)
+			if word == nil || text2 == "" {
+				// Between words: whatever whitespace is here separates them.
+				if text != "" {
+					buf.space = true
+				}
+				continue
+			}
+			buf.add(syllable{
+				start:       word.start,
+				end:         word.end,
+				text:        text2,
+				spaceBefore: unicode.IsSpace(firstRune(text)),
+			})
+			// Trailing whitespace inside the span still separates it from
+			// whatever follows.
+			buf.space = unicode.IsSpace(lastRune(text))
+		}
+	}
+	flush()
+	return out
+}
+
+func firstRune(s string) rune {
+	for _, r := range s {
+		return r
+	}
+	return 0
+}
+
+func lastRune(s string) rune {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return r
 }
 
 // lineLevelLRC emits standard `[00:08.789]full line text` LRC.
