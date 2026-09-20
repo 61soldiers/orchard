@@ -433,15 +433,25 @@ Timestamps in Apple's TTML are **not** `HH:MM:SS` clock-time — they're abbrevi
 `"8.789"` (seconds only) or `"1:00.652"` (`M:SS.mmm`, minutes only present once ≥ 60s).
 `parseTTMLTime` handles 1, 2 or 3 colon-separated parts; don't assume a fixed field count.
 
+**Word timing is a different endpoint.** `/v1/catalog/{sf}/songs/{id}/lyrics` only ever carries
+`itunes:timing="Line"` — verified on a track the Apple Music app shows word-by-word (Gracie Abrams,
+"Hit the Wall"). Word timing comes from `.../songs/{id}/syllable-lyrics`, which `Client.Lyrics()`
+asks for whenever the plain document is not already word level (`syllableTTML`); a song without it
+keeps its line-level result, and that fetch failing is never an error. This is why an earlier
+round of testing "never found" a word-timed track: it was asking the one endpoint that cannot
+return one.
+
 Word-level output is the informal "enhanced LRC" shape —
-`[00:08.789]<00:08.789>Hello <00:09.100>world`, one inline `<mm:ss.xxx>` tag per word ahead of the
-line's own bracket tag. This was validated against a structurally accurate **synthetic** sample
-(Go's `encoding/xml` namespace-matching behaviour confirmed correct — a struct field tagged
-`xml:"timing,attr"` with no namespace matches `itunes:timing` by local name alone); a real
-word-by-word ("Apple Music Sing") track has not turned up through this endpoint in testing across
-a couple dozen tracks, popular ones included — it may be gated to a narrower surface than the
-general catalog lyrics call, or genuinely rare in the wild. If you ever find one, that's the case
-most worth re-verifying by hand.
+`[00:08.789]<00:08.789>Hello <00:09.100>world<00:09.700>`: the line's bracket tag, one inline
+`<mm:ss.xxx>` tag per word, and a closing tag where the last word ends. Three properties matter:
+
+- **Spacing comes from the document.** Apple splits a sung word into syllable spans with no
+  whitespace between them (`pave` `ment`); `wordLevelLRC` keeps that, so the client can glue them
+  instead of rendering "pave ment". It is a token walk (`parseSyllableLines`), not a struct decode,
+  because the whitespace lives between elements and nested spans need tracking.
+- **Backing vocals (`ttm:role="x-bg"`) become their own line.** They are timed on top of the main
+  line, so folding them in would make the tags run backwards.
+- **Translation / transliteration spans are skipped** — they are not the sung words.
 
 ---
 

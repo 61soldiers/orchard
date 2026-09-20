@@ -221,10 +221,11 @@ TTML itself. Apple declares the sync tier directly on the TTML root (`itunes:tim
 `lrc`/`syncLevel` reflect whichever tier the conversion actually landed on:
 
 - `"word"` — the informal "enhanced LRC" shape, one inline `<mm:ss.xxx>` tag per word ahead of the
-  line's own `[mm:ss.xxx]` tag: `[00:08.789]<00:08.789>Hello <00:09.100>world`. Validated against a
-  structurally accurate synthetic sample; a real word-by-word ("Apple Music Sing") track has not
-  turned up through this endpoint in testing — it may be gated to a narrower surface than the
-  general catalog lyrics call.
+  line's own `[mm:ss.xxx]` tag and a closing tag after the last word:
+  `[00:08.789]<00:08.789>Hello <00:09.100>world<00:09.700>`. Syllables of one word are adjacent tags
+  with no space between them. Apple serves word timing from a separate `syllable-lyrics` resource,
+  which Orchard asks for when `/lyrics` is only line level; `ttml` then holds that word-timed
+  document.
 - `"line"` — standard `[00:08.789]full line text` LRC. The common case for anything with
   `hasTimeSyncedLyrics: true`.
 - `"none"` — bare text lines, no time tags at all.
