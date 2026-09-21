@@ -238,6 +238,33 @@ inline (`include[*-period-summaries]` + `fields[]` narrowing) — a 100-row lead
 would otherwise cost 100 follow-up lookups. Keep `Summary`/`SummaryEntry` in sync with elbert's
 `OrchardSummary`.
 
+**Replay is the whole of Apple's listening history, and it is coarser than it looks.** Probed
+against a live account (2025: 22,208 minutes, 2,003 unique songs), because a client wanting to
+export listening history to a scrobbler needs to know exactly what is and is not here:
+
+- **100 rows per period, hard.** `limit=200` on a view is refused by Apple itself — *"Value must
+  be an integer less than or equal to 100"* — and `offset` past 100 is a 404. There is no `next`
+  on a view, and `limit[views:top-songs]` / `offset[views:top-songs]` are ignored. Those 100 rows
+  covered 2,544 plays of a year with 2,003 unique songs, so well under half of it.
+- **A month's rankings do not exist, only its totals.** The listing gives real per-month counters
+  (`listenTimeInMinutes`, `unique*Count`, and a `topSongCount` of 30), but every way of asking for
+  a month's rows returns *the year's*: `GET /music-summaries/month-2025-10?views=top-songs` and
+  `.../month-2025-10/view/top-songs` both come back with the same 100 entries as `year-2025`,
+  carrying `year: "2025"` and year-wide `firstPlayed`/`lastPlayed`. The month id is echoed into
+  each row's own id (`month-2025-10-song-1773474484`) while the attributes stay year-scoped, which
+  is what makes this easy to mistake for working. `period=`, `year=` and `filter[period]=` are all
+  rejected on the per-id call (400), and `views=` is ignored on `/search`. So a client must not
+  present a month's `Top*` as that month's — they are the year's.
+- **No per-play timestamps exist anywhere in amp-api.** `/v1/me/recent/played/tracks` carries no
+  played-at field and no `meta` (it does carry `isrc`), `extend=playedDate,lastPlayedDate` is
+  silently ignored, and the feed is only ~24 entries deep (`offset=20` returned 4 rows and no
+  `next`; `offset=50` was empty). `/v1/me/history/heavy-rotation` returns library *playlists* with
+  no counts or dates, and `extend=playCount,lastPlayedDate` on `/v1/me/library/songs` is dropped.
+  `POST /v1/me/play-activity` remains write-only.
+
+The upshot for any history export: `playCount` + `firstPlayed`/`lastPlayed` over a year-wide
+window, for the top 100 songs of each year. That is the ceiling, not a limitation of this client.
+
 `Library*` reads the account's *own* added music and playlists (`/v1/me/library/...`, not
 storefront-scoped). Apple's library ids (`i.*`/`l.*`/`p.*`) are useless to the stream/download
 pipeline, so every item is resolved to its catalog resource via `include=catalog` (fallback:

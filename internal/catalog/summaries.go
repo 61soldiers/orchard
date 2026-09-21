@@ -220,7 +220,35 @@ func (c *Client) Summary(ctx context.Context, id string) (*Summary, error) {
 		return nil, ErrNotFound
 	}
 	s := convSummary(raw.Data[0])
+	dropYearScopedRankings(&s)
 	return &s, nil
+}
+
+// dropYearScopedRankings clears a month's Top* lists, because Apple does not
+// compute them.
+//
+// Asking for a month returns the *year's* 100 rows: same entries as year-YYYY,
+// each carrying `year` and a year-wide firstPlayed/lastPlayed, with only the
+// row ids rewritten to the month (`month-2025-10-song-1773474484`). Verified
+// live against both `?views=top-songs` and `/view/top-songs`; `period=`,
+// `year=` and `filter[period]=` are all rejected on the per-id call, and the
+// listing's `topSongCount: 30` has no endpoint that will produce those 30
+// rows. See the Replay notes in CLAUDE.md.
+//
+// Passing them through is what makes a client render a year's leaderboard
+// under a month's heading — which elbert's Replay month page did. A month's
+// own counters (listen time, unique counts, milestones) are genuinely the
+// month's and are left alone.
+func dropYearScopedRankings(s *Summary) {
+	if s.Period != PeriodMonth {
+		return
+	}
+	s.TopSongs = nil
+	s.TopAlbums = nil
+	s.TopArtists = nil
+	s.TopGenres = nil
+	s.TopPlaylists = nil
+	s.TopStations = nil
 }
 
 type rawSummary struct {
