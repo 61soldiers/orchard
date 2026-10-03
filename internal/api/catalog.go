@@ -1,0 +1,221 @@
+package api
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+
+	"orchard/internal/apple"
+	"orchard/internal/catalog"
+)
+
+// catalogError maps client errors onto HTTP responses. Apple's own detail is
+// safe to pass through; it never contains tokens.
+func (s *Server) catalogError(w http.ResponseWriter, r *http.Request, err error) {
+	var apiErr *catalog.APIError
+	switch {
+	case errors.Is(err, catalog.ErrStationNotPlayable):
+		writeError(w, http.StatusUnprocessableEntity, "station_not_playable",
+			"this station has no playable tracks (Apple's live radio channels are broadcast-only)")
+	case errors.Is(err, catalog.ErrInvalidCursor):
+		writeError(w, http.StatusBadRequest, "invalid_query", "invalid pagination cursor")
+	case errors.Is(err, catalog.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "no such item in the Apple Music catalog")
+	case errors.Is(err, apple.ErrNotReady):
+		writeError(w, http.StatusServiceUnavailable, "apple_not_ready",
+			"the Apple Music session is not signed in; run setup first")
+	case errors.Is(err, catalog.ErrUnauthorized):
+		writeError(w, http.StatusBadGateway, "apple_unauthorized",
+			"Apple rejected the stored session; sign in again")
+	case errors.As(err, &apiErr):
+		writeError(w, http.StatusBadGateway, "apple_error", apiErr.Error())
+	default:
+		writeInternalError(w, r, err)
+	}
+}
+
+// handleStationTracks returns the next batch of songs for a personalized
+// station. Each call advances the station, so a client fetches a batch, plays
+// it, and comes back for more — there is no stable, re-fetchable track list.
+func (s *Server) handleStationTracks(w http.ResponseWriter, r *http.Request) {
+	if !s.appleReady(w) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	songs, err := s.catalog.StationTracks(r.Context(), id, limit)
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs})
+}
+
+func (s *Server) handleStorefront(w http.ResponseWriter, r *http.Request) {
+	sf, err := s.catalog.Storefront(r.Context())
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"storefront": sf})
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	term := strings.TrimSpace(q.Get("term"))
+	if term == "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "term is required")
+		return
+	}
+
+	var types []string
+	if raw := strings.TrimSpace(q.Get("types")); raw != "" {
+		for _, t := range strings.Split(raw, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				types = append(types, t)
+			}
+		}
+	}
+
+	limit := 0
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_query", "limit must be a positive number")
+			return
+		}
+		limit = n
+	}
+
+	res, err := s.catalog.Search(r.Context(), term, types, limit)
+	if err != nil {
+		// A bad type is the caller's fault, not Apple's.
+		if strings.HasPrefix(err.Error(), "unknown search type") {
+			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleAlbum(w http.ResponseWriter, r *http.Request) {
+	album, err := s.catalog.Album(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, album)
+}
+
+func (s *Server) handleArtist(w http.ResponseWriter, r *http.Request) {
+	artist, err := s.catalog.Artist(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, artist)
+}
+
+func (s *Server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
+	playlist, err := s.catalog.Playlist(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, playlist)
+}
+
+// handlePlaylistTracks returns the next page of a catalog playlist's tracks.
+// cursor must be a tracksNextCursor from the playlist itself or a previous
+// call here — there is no cold-start form, since the first page always comes
+// bundled with GET /v1/playlists/{id}.
+func (s *Server) handlePlaylistTracks(w http.ResponseWriter, r *http.Request) {
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor == "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "cursor is required")
+		return
+	}
+	songs, next, err := s.catalog.PlaylistTracks(r.Context(), chi.URLParam(r, "id"), cursor)
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	if songs == nil {
+		songs = []catalog.Song{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs, "nextCursor": next})
+}
+
+func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {
+	song, err := s.catalog.Song(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, song)
+}
+
+func (s *Server) handleLyrics(w http.ResponseWriter, r *http.Request) {
+	lyrics, err := s.catalog.Lyrics(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lyrics)
+}
+
+func (s *Server) handleCharts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	var types []string
+	if raw := strings.TrimSpace(q.Get("types")); raw != "" {
+		for _, t := range strings.Split(raw, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				types = append(types, t)
+			}
+		}
+	}
+
+	limit := 0
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_query", "limit must be a positive number")
+			return
+		}
+		limit = n
+	}
+
+	charts, err := s.catalog.Charts(r.Context(), types, strings.TrimSpace(q.Get("genre")), limit)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "unknown chart type") {
+			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		s.catalogError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, charts)
+}
+
+// handleBrowse returns Apple's editorial "Browse" rows. The upstream shape is
+// undocumented and fragile, so a parse that finds nothing is a 200 with an
+// empty list, not an error — clients hide the section in that case.
+func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.catalog.Groupings(r.Context())
+	if err != nil {
+		s.catalogError(w, r, err)
+		return
+	}
+	if groups == nil {
+		groups = []catalog.EditorialGroup{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}
