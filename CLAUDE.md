@@ -31,6 +31,15 @@ When changing a response shape here, that file needs the matching update.
   below came within one `git reset` of being lost. If you patch a running managed container by
   copying files into `~/.local/share/com.evolvedmesh.elbert/orchard/src`, commit the same change
   here in the same sitting.
+- **Releases are automatic** ([.github/workflows/release.yml](.github/workflows/release.yml),
+  [.releaserc.json](.releaserc.json), the same shape as Elbert's). A push to `main` runs the tests, then
+  semantic-release reads the Conventional Commit messages, tags the next version and publishes a GitHub release
+  with generated notes; `dev` and `mvp` get prereleases (`-dev.N`, `-mvptest.N`) with notes and no binaries.
+  On a stable release only, a matrix builds every platform (linux/darwin amd64+arm64, windows amd64, with the
+  version baked in by `-X main.version`) and a publish job attaches the archives plus `checksums.txt`.
+  There is no version file, so no `ci(release):` commit and no protected-branch App token: the default
+  `GITHUB_TOKEN` is enough. So write commit messages for it: `feat:` → minor, `fix:` → patch,
+  `BREAKING CHANGE:` footer → major, and `chore:`/`docs:`/`ci:` release nothing. `orchard --version` prints it.
 - Single-tenant: one API key, one Apple session, no user accounts. Every DB row is unscoped.
 - The daemon is Linux `amd64`/`arm64` only — no build for anything else. The *host* can be Linux,
   macOS or Windows: on macOS and Windows the daemon runs unchanged inside Docker Desktop's Linux
