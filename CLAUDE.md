@@ -14,23 +14,23 @@ orchestration approach of [`apple-music-downloader`](https://github.com/zhaarey/
 own contribution is the daemon lifecycle (auto-provisioning, supervision, first-run 2FA), the HTTP
 API, the SQLite-backed job/library store, and hardening (rate limits, retries).
 
-**Known consumer**: [elbert](../elbert) (a Flutter music player) has a compile-time-optional Apple
-Music tab that talks to this API — see `elbert/CLAUDE.md`'s "Apple Music (Orchard)" section and
-`elbert/lib/services/orchard_service.dart` for the client-side shape every response below maps to.
-When changing a response shape here, that file needs the matching update.
+**Known consumer**: the Elbert Apple Music plugin
+([61soldiers/elbert-apple-music-plugin](https://github.com/61soldiers/elbert-apple-music-plugin); Elbert is a
+Flutter music player). It downloads this server's release build, runs it for the user as a hidden child process
+and talks to this API — see its `CLAUDE.md`'s "Orchard, managed" section. Its client, `src/orchard/client.ts`,
+mirrors every response below, so **when you change a response shape here, that file needs the matching
+update** (this file calls it "the plugin's client").
 
-- A git repository (`evolvedmesh/orchard`), but a young one whose commits are coarse feature
-  drops — this file and [docs/reference.md](docs/reference.md) remain the record of *why*, since
-  `git log` will rarely explain a decision. Work happens on `mvp`; `main`/`dev` do not yet carry
-  the server code.
-- **Commit before bundling.** Elbert ships this source inside its app
-  (`elbert/tool/fetch_orchard_src.sh` → `assets/orchard/orchard-src.tar.gz`), and with
-  `ORCHARD_SRC_DIR` it tars a local checkout's **working tree**, uncommitted changes included.
-  Elbert's release CI always bundles a clean checkout of `mvp`, so anything not committed here
-  exists only on the machine that built the local tarball — which is how the daemon crash-recovery
-  below came within one `git reset` of being lost. If you patch a running managed container by
-  copying files into `~/.local/share/com.evolvedmesh.elbert/orchard/src`, commit the same change
-  here in the same sitting.
+- A git repository (`61soldiers/orchard`), but a young one whose commits are coarse feature drops — this file
+  and [docs/reference.md](docs/reference.md) remain the record of *why*, since `git log` will rarely explain a
+  decision. `main` is the release branch: it is what gets tagged, built and published. Change it through pull
+  requests. `.releaserc.json` also configures `dev` and `mvp` prerelease channels; those branches don't exist
+  until someone creates them.
+- **Commit before bundling.** The plugin builds this source into the runtime pack it ships
+  (`tool/build_runtime.sh` in its repo). With `ORCHARD_SRC_DIR` that builds a local checkout's **working
+  tree**, uncommitted changes included, while its release CI builds a clean checkout of `main`, so anything not
+  committed (and merged) here exists only on the machine that built the local pack — which is how the daemon
+  crash-recovery below came within one `git reset` of being lost.
 - **Releases are automatic** ([.github/workflows/release.yml](.github/workflows/release.yml),
   [.releaserc.json](.releaserc.json), the same shape as Elbert's). A push to `main` runs the tests, then
   semantic-release reads the Conventional Commit messages, tags the next version and publishes a GitHub release
@@ -41,14 +41,17 @@ When changing a response shape here, that file needs the matching update.
   `GITHUB_TOKEN` is enough. So write commit messages for it: `feat:` → minor, `fix:` → patch,
   `BREAKING CHANGE:` footer → major, and `chore:`/`docs:`/`ci:` release nothing. `orchard --version` prints it.
 - Single-tenant: one API key, one Apple session, no user accounts. Every DB row is unscoped.
-- The daemon is Linux `amd64`/`arm64` only — no build for anything else. The *host* can be Linux,
-  macOS or Windows: on macOS and Windows the daemon runs unchanged inside Docker Desktop's Linux
-  VM (WSL2 on Windows, LinuxKit on macOS — both ship with unprivileged user namespaces on).
-  `setup.sh` covers Linux and macOS (it branches on `uname -s` — skips the host `/proc` userns
-  check on Darwin, avoids `sed -i`); `setup.ps1` is the Windows/PowerShell port. Anything outside
-  a Linux container (Windows containers, a non-WSL2 Docker backend) cannot work — the daemon needs
-  `unshare(CLONE_NEWUSER|NEWNS|NEWPID)`. macOS is newer and less battle-tested than Linux.
-
+- The daemon is Linux `amd64`/`arm64` only — no build for anything else — and Orchard can host it three ways
+  (details below, and in "The Apple session"):
+  - **natively on Linux**: a child process in a user+mount+PID namespace Orchard creates itself, no container;
+  - **in a QEMU guest** that Orchard boots when the host app supplies QEMU and the guest image
+    (`ORCHARD_QEMU`, `ORCHARD_GUEST_DIR`) — this is how macOS, Windows and hardened Linux run it. The release
+    archives contain Orchard alone, so a bare macOS/Windows download can't host the daemon;
+  - **in Docker** (compose): the Docker route for self-hosters on any OS; on macOS and Windows the daemon runs
+    inside Docker Desktop's Linux VM (WSL2 on Windows, LinuxKit on macOS). `setup.sh` (Linux/macOS) and
+    `setup.ps1` (Windows) drive only this route and refuse to run without Docker. Anything outside a Linux
+    container (Windows containers, a non-WSL2 backend) cannot work. Checked: the image built from `main`
+    brings a migrated session to `ready` in a container.
 ---
 
 ## Status
@@ -235,7 +238,7 @@ Two packages, two concerns, one lifecycle:
   to `failed` with the last error if it won't come up. It bails out the moment `loginActive` is
   set, so it can never race a real `Login()`/`Submit2FA()` that has taken over the state machine.
   Without this a transient crash left the user staring at a sign-in form for a session that was
-  never actually lost — elbert's `appleMusicStatusProvider` still restarts the container on the
+  never actually lost — the plugin's status polling (`connection.ts`) still restarts the managed Orchard on the
   first `failed` status as a second line of defence.
 - **`apple/account.go`** — `Account()` caches the daemon's dev/media-user tokens for 5 minutes and
   adapts them to `catalog.TokenSource` via `CatalogTokens()`. Never log either token.
@@ -276,7 +279,7 @@ endpoint and not documented anywhere**: it was found by probing a live account, 
 resource type actually observed on one was `library-playlists`, so the decoding is deliberately
 type-agnostic (one `rawPinAttrs` covering every pinnable type, absent fields simply staying empty)
 rather than modelled on the one case we can see. It resolves to catalog ids the same way the
-`Library*` methods do; keep the `Pin` shape in sync with elbert's `OrchardPin`.
+`Library*` methods do; keep the `Pin` shape in sync with the plugin client's.
 
 `Summaries`/`Summary` ([internal/catalog/summaries.go](internal/catalog/summaries.go)) read
 `/v1/me/music-summaries` — Apple Music **Replay**, the tally behind `music.apple.com/replay`.
@@ -294,8 +297,8 @@ client never branches on `Item` being nil just to draw a label. Apple rejects `p
 without a `year` and `period=year` with one, so `Summaries` enforces the pairing rather than
 letting a 400 through. The per-id call asks for every view at once and hydrates each ranked row
 inline (`include[*-period-summaries]` + `fields[]` narrowing) — a 100-row leaderboard of bare ids
-would otherwise cost 100 follow-up lookups. Keep `Summary`/`SummaryEntry` in sync with elbert's
-`OrchardSummary`.
+would otherwise cost 100 follow-up lookups. Keep `Summary`/`SummaryEntry` in sync with the plugin
+client's.
 
 **Replay is the whole of Apple's listening history, and it is coarser than it looks.** Probed
 against a live account (2025: 22,208 minutes, 2,003 unique songs), because a client wanting to
@@ -336,7 +339,7 @@ resolves the whole thing. `LibraryPlaylist(ctx, id)` (singular) is metadata + fi
 same shape as catalog `Playlist`; its `TrackCount` is therefore only the page-so-far count until
 `TracksNextCursor` goes empty (documented on the field — don't read it as a true total before
 that). `handleLibrary*Me` in [internal/api/library_me.go](internal/api/library_me.go); keep the
-`LibraryPlaylist` shape in sync with elbert's `orchard_service.dart`.
+`LibraryPlaylist` shape in sync with the plugin's `src/orchard/client.ts`.
 
 `Artist` requests Apple's discography `views` (top-songs, singles, similar-artists, …) and
 `extend=artistBio,bornOrFormed,origin` — search still returns only id/name/artwork.
@@ -382,7 +385,7 @@ like any other track, so nothing new was needed below `catalog`.
 **Each call advances the station server-side** — two calls return different songs. There is no
 stable track list, which is why the API exposes it as `POST .../next-tracks` and not as a
 station-detail GET, and why a client plays a station by fetching a batch and coming back for the
-next one as the queue drains (elbert's `AppleMusicStationPlayer` does exactly that).
+next one as the queue drains (the plugin's station player does exactly that).
 
 A *live* station (Apple Música 1 and the other broadcast channels) is the case the old note here
 was about: a continuous broadcast with no track list at all. `StationTracks` returns
@@ -397,7 +400,7 @@ account's own playlists. Three things about it are load-bearing:
 - **Reorder and remove are the same operation as replace.** Apple has no "move track" or "remove
   one track" on a library playlist, so `SetLibraryPlaylistTracks` sends the complete list in its
   intended order. A caller holding only one page of a paginated playlist would silently truncate
-  it — which is why the elbert side walks every page before calling. Clearing a playlist needs an
+  it — which is why the plugin walks every page before calling. Clearing a playlist needs an
   explicit `allowEmpty`, so the shape a client bug takes (an empty list) is a 400 rather than a
   wiped playlist.
 - **Retries are split by idempotency**, which is why `sendJSON` and `sendIdempotent` are separate
@@ -428,7 +431,7 @@ streams the media playlist's single byte-range asset, decrypting each `moof`/`md
 through the daemon's port-10020 oracle as it arrives — nothing is buffered whole-track, which is
 what lets playback start before a track finishes.
 
-**Real consumer**: elbert's Apple Music tab plays a track by handing `media_kit` the
+**Real consumer**: the Elbert plugin plays a track by handing Elbert's media player (`media_kit`) the
 `/v1/songs/{id}/stream` URL directly, `?api_key=` and all (see the API section's note on
 `presentedKey`'s query-param fallback). This is a live, load-bearing dependency now, not just a
 documented endpoint — changing the stream response's framing, the `codec` query param's accepted
@@ -460,7 +463,7 @@ same reason a genuine seek is refused with `416` in `handleSongStream`.
 `Range: bytes=0-` is treated as no Range at all rather than refused. ffmpeg/libmpv's HTTP protocol
 sends exactly that on *every* `open()` of a network stream, by default, to probe seekability — not
 only on an actual seek — so refusing it (the original behavior) made this endpoint fail to open in
-any native media player, elbert included, while curl without an explicit `Range` header worked
+any native media player (Elbert's included), while curl without an explicit `Range` header worked
 fine. `isWholeBodyRange` in [internal/api/stream.go](internal/api/stream.go) is the exact
 allowlist: only `bytes=0-`, nothing else. Confirmed live: `curl -H "Range: bytes=0-" .../stream`
 now 200s with the full body; `curl -H "Range: bytes=1000-"` still 416s. If you ever see "failed to
@@ -486,8 +489,8 @@ describing the count — only *every* track failing makes the job itself `failed
 runs once at startup and marks anything left `running`/`queued` from a crash as `failed`, so the
 API never shows work that will never progress.
 
-**A note for any client, elbert included**: Orchard's API *supports* `type: "playlist"` (it works,
-and `docs/reference.md` documents it), but elbert's own UI deliberately never calls it, expanding a
+**A note for any client**: Orchard's API *supports* `type: "playlist"` (it works,
+and `docs/reference.md` documents it), but the Elbert plugin deliberately never calls it, expanding a
 playlist into one `type: "song"` job per track client-side instead, because
 apple-music-downloader's pipeline (which this wraps) resolves and decrypts a playlist's tracks
 more reliably one at a time than as one combined job. If you add another consumer of this API,
@@ -574,7 +577,7 @@ Absent fields are omitted rather than zeroed — that is what MusicKit does (`cr
 Unlike `catalog`, this package needs the numeric storefront (`143441-…`) on top of the two tokens,
 which is why `apple.Manager` exposes a second, wider source (`PlayActivityTokens`) rather than
 reusing `CatalogTokens`. Nothing here is on playback's critical path: a rejected report costs a
-history entry and nothing else, and both `api` and elbert treat it that way.
+history entry and nothing else, and both `api` and the plugin treat it that way.
 
 ---
 
@@ -605,7 +608,7 @@ a SHA-256 digest, never the raw key — see `requireAPIKey` in
 [internal/api/middleware.go](internal/api/middleware.go)) except `/healthz`. `presentedKey()` falls
 back to an `?api_key=` query parameter whenever the header is absent — the doc comment motivates
 this with the browser `EventSource` API (which can't set headers), but the fallback is not actually
-restricted to SSE routes, it applies to every route. elbert's client relies on exactly that for
+restricted to SSE routes, it applies to every route. the plugin relies on exactly that for
 `/v1/songs/{id}/stream`, which a native media player hands a bare URL with no header support —
 same embed-the-key-in-the-URL pattern Subsonic clients already use. Don't tighten this to
 SSE-only without checking every consumer first. Rate limited
@@ -632,7 +635,7 @@ error needs a specific status code, don't `writeError` an ad-hoc code inline in 
 
 Full request/response shapes, config table, and the security model live in
 [docs/reference.md](docs/reference.md) — keep it in sync with `api/`, `catalog/models.go`, and
-`config/config.go` whenever any of those change; it's the contract elbert's `orchard_service.dart`
+`config/config.go` whenever any of those change; it's the contract the plugin's client
 is written against.
 
 ---
