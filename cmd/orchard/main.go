@@ -26,6 +26,22 @@ import (
 )
 
 func main() {
+	// A re-exec of ourselves from inside the daemon's sandbox, to find out
+	// whether this host allows it. See wrapper.ProbeSandbox.
+	if len(os.Args) == 2 && os.Args[1] == wrapper.CheckArg {
+		if err := wrapper.CheckSandbox(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == wrapper.ProbeArg {
+		if err := wrapper.ProbeSandbox(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
@@ -116,7 +132,6 @@ func run() error {
 	wpClient := webplayback.New()
 	downloads := download.New(st, streamClient, catalogClient, appleMgr.CatalogTokens, wpClient, download.Config{
 		LibraryDir: cfg.LibraryDir,
-		FFmpegPath: cfg.FFmpegPath,
 	})
 	go downloads.Run(ctx)
 

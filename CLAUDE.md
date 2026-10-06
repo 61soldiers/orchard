@@ -113,7 +113,7 @@ internal/
                        through the daemon's decrypt oracle; also vendors the cbcs sample
                        decryption logic (stream/decrypt.go)
   download/            turns a catalog request into files on disk: one job, tracks processed
-                       serially, ffmpeg remux+tag, writes to store.Track on completion
+                       serially, remux+tag (`internal/m4a`, pure Go), writes to store.Track on completion
   store/               SQLite (modernc.org/sqlite, no cgo): jobs, per-track progress, the
                        downloaded-track index, migrations
   ratelimit/           tiny self-contained token bucket (no dependency), used both as inbound
@@ -161,6 +161,56 @@ Two packages, two concerns, one lifecycle:
   `code_accepted`, `login_failed`, `listening`, …), and redacts the `Music-Token` line before
   logging. `WaitListening` polls all four TCP ports rather than trusting a log line, since the
   daemon can print "listening" before the socket is actually accept()-ing.
+- **No container needed on Linux.** `daemonCommand` ([launch_linux.go](internal/wrapper/launch_linux.go))
+  creates the user+mount+PID namespace itself, so Orchard runs as a plain process for a normal user —
+  Elbert's Apple Music plugin does exactly that. Three details that cost a debugging session:
+  the stock launcher must be exec'd as `./wrapper` from its own directory (a long absolute `argv[0]`
+  makes it exit 0 silently, nothing listening); `Unshareflags: CLONE_NEWNS` (not `Cloneflags`) so `/`
+  becomes private; and hosts that strip a user namespace's capabilities (Ubuntu 24.04+ AppArmor) are
+  detected by `orchard __check-sandbox` (a real mount+chroot probe inside the sandbox), after which
+  the daemon runs under the proot named by `ORCHARD_PROOT` if the host supplied one. **The proot
+  fallback is untested on desktop** (it mirrors the Android launch, which is verified on device).
+  `ORCHARD_EXIT_WITH_PARENT=1` makes Orchard leave when whoever started it does (always on Android).
+  Off Linux the daemon has no host yet: `launch_other.go` reports it as unsupported.
+- **The daemon in a virtual machine** ([vm.go](internal/wrapper/vm.go), [internal/guest](internal/guest/)).
+  macOS and Windows have no Linux kernel to sandbox the daemon with, and a Linux host that blocks user
+  namespaces may have none of them usable either. `runner()` picks `native` (user namespaces) → `proot`
+  (`ORCHARD_PROOT`) → `qemu` (`ORCHARD_QEMU` + `ORCHARD_GUEST_DIR`, set by the host app); `ORCHARD_RUNNER`
+  forces one. The guest is Alpine's `linux-virt` kernel + busybox + four modules, pinned by sha256
+  (`cmd/guestbuild`, needs `mke2fs`); Orchard adds the daemon's Android tree as a second initramfs layer
+  at start (rebuilt when the daemon or base changed) and boots it with QEMU's user-mode network, the
+  four daemon ports forwarded to `127.0.0.1`. Things that cost debugging and are not obvious:
+  - the CPU model must be `Nehalem` (the daemon dies with SIGILL on `qemu64`); KVM (Linux) and HVF (Intel Mac) fall
+    back to `tcg`; Windows and Apple Silicon are TCG only (no WHPX), and software emulation still
+    downloads a 42 MB lossless track in 18 s;
+  - the release archive ships `linker64` without its execute bit; the guest's init `chmod`s it;
+  - the daemon's output is QEMU's **stdout** (the serial console), so the supervisor reads stdout+stderr
+    as one stream in VM mode, and `WaitListening` waits for the daemon's own ready line, because QEMU's
+    port forwards accept connections long before anything listens in the guest;
+  - the Apple session lives on a disk image the host can't read, so `VMSession` replaces the file-based
+    login checks: a host-side marker for "logged in", the 2FA code sent over the console as
+    `ORCHARD2FA <code>`, logout deleting the disk. VM state is in `<wrapper dir>-vm/`, **beside** the
+    daemon's directory, because installing a new daemon replaces that whole directory;
+  - the host pings the guest every 5 s and the guest powers off after 40 s of silence, since a serial
+    line can't signal EOF — that is what stops an orphaned VM when Orchard is killed (no Pdeathsig on
+    macOS/Windows);
+  - arguments reach the guest through a `fw_cfg` file (not the command line, so a password isn't in the
+    process list), one per line; a background job in a shell without job control reads `/dev/null`, so the
+    guest's console reader redirects stdin explicitly.
+  - a login made before the guest existed (a host daemon's, or a Docker volume's after the plugin moved it
+    over) is packed as a tar (`seedSession`) and passed through `fw_cfg`; init unpacks it only if the disk
+    has none, and `VMSession.LoggedIn` counts it as logged in so the daemon starts at all.
+  The QEMU the host supplies is built from source with nothing but the guest's needs (see the plugin's
+  `tool/qemu/build.sh`): ~4–5 MB compressed per OS, and the Windows one needs no DLLs beyond Windows'.
+  Verified: Linux/KVM, a Linux host with namespaces blocked (falls back by itself, with the bundled static
+  QEMU), Windows (orchard.exe + the minimal Windows QEMU, under Wine, TCG), and **macOS on Apple Silicon and
+  Intel in CI** (QEMU built there; the real daemon initialises in the guest under TCG in ~49 s / ~15 s).
+  **Not verified:** a real Windows machine, HVF on an Intel Mac, an aarch64 guest (an Apple Silicon Mac runs
+  the x86_64 guest under TCG, which is slow to start the daemon; an arm64 guest + arm64 daemon under HVF would
+  be near-native), and a guest login/2FA with real credentials.
+- **No ffmpeg.** `internal/m4a` turns the decrypted fragmented MP4 into a progressive `.m4a` with
+  tags and cover (stream copy; tested byte-identical against ffmpeg's packets, and verified on a real
+  Apple ALAC download).
 - **`apple.Manager`** ([internal/apple/apple.go](internal/apple/apple.go)) — the state machine:
   `unconfigured → starting → awaiting_2fa → ready` (or `→ failed` from most states). `Login()`
   blocks until one of those is reached; `Submit2FA()` the same. `LoggedIn()` requires **both**
@@ -421,7 +471,7 @@ contend on the same socket. `Enqueue()` expands `song|album|artist|playlist` int
 immediately whether there's anything to download rather than waiting for the worker to find out.
 
 Per-track pipeline, in order: `manifest` (resolve HLS) → `download`+`decrypt` (streamed together,
-see `stream.Open`) → `remux` (ffmpeg stream-copy into a progressive `.m4a`, cover art attached in
+see `stream.Open`) → `remux` (`internal/m4a`: a stream copy into a progressive `.m4a`, cover art attached in
 the same pass) → `tag` → `done`. A job whose tracks partly fail still ends `done` with `error`
 describing the count — only *every* track failing makes the job itself `failed`. `ResumeInterrupted`
 runs once at startup and marks anything left `running`/`queued` from a crash as `failed`, so the

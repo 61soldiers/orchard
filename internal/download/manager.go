@@ -14,14 +14,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"orchard/internal/catalog"
+	"orchard/internal/m4a"
 	"orchard/internal/store"
 	"orchard/internal/stream"
 	"orchard/internal/webplayback"
@@ -49,7 +48,6 @@ type Request struct {
 // Config wires the manager to its dependencies.
 type Config struct {
 	LibraryDir string
-	FFmpegPath string
 	QueueSize  int
 }
 
@@ -76,9 +74,6 @@ var ErrUnknownType = errors.New("type must be song, album, artist or playlist")
 // for the Widevine web-playback fallback (wp), used for AAC-only tracks that
 // have no FairPlay HLS rendition.
 func New(st *store.Store, str *stream.Client, cat *catalog.Client, tokens catalog.TokenSource, wp *webplayback.Client, cfg Config) *Manager {
-	if cfg.FFmpegPath == "" {
-		cfg.FFmpegPath = "ffmpeg"
-	}
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 64
 	}
@@ -382,7 +377,7 @@ func (m *Manager) runTrack(ctx context.Context, job store.Job, trackID string) e
 	setPhase(store.PhaseRemux, 0, 0)
 	coverPath := m.fetchCover(ctx, song, tmpDir)
 	outPath := filepath.Join(tmpDir, "out.m4a")
-	if err := m.remux(ctx, rawPath, coverPath, outPath, song); err != nil {
+	if err := m.remux(rawPath, coverPath, outPath, song); err != nil {
 		return err
 	}
 
@@ -428,44 +423,40 @@ func (m *Manager) runTrack(ctx context.Context, job store.Job, trackID string) e
 }
 
 // remux converts the decrypted fragmented MP4 into a progressive .m4a, adding
-// tags and cover art in the same pass. Stream copy only, so audio is untouched.
-func (m *Manager) remux(ctx context.Context, in, cover, out string, song *catalog.Song) error {
-	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-i", in}
+// tags and cover art in the same pass. The audio is copied, never re-encoded.
+func (m *Manager) remux(in, cover, out string, song *catalog.Song) error {
+	tags := m4a.Tags{
+		Title:       song.Name,
+		Artist:      song.ArtistName,
+		Album:       song.AlbumName,
+		AlbumArtist: song.ArtistName,
+		Composer:    song.ComposerName,
+		Date:        song.ReleaseDate,
+		Genre:       strings.Join(song.Genres, "; "),
+		Track:       song.TrackNumber,
+		Disc:        song.DiscNumber,
+	}
 	if cover != "" {
-		args = append(args, "-i", cover, "-map", "0:a", "-map", "1:v",
-			"-disposition:v:0", "attached_pic")
-	} else {
-		args = append(args, "-map", "0:a")
-	}
-	args = append(args, "-c", "copy")
-
-	meta := map[string]string{
-		"title":        song.Name,
-		"artist":       song.ArtistName,
-		"album":        song.AlbumName,
-		"album_artist": song.ArtistName,
-		"composer":     song.ComposerName,
-		"date":         song.ReleaseDate,
-		"genre":        strings.Join(song.Genres, "; "),
-	}
-	if song.TrackNumber > 0 {
-		meta["track"] = strconv.Itoa(song.TrackNumber)
-	}
-	if song.DiscNumber > 0 {
-		meta["disc"] = strconv.Itoa(song.DiscNumber)
-	}
-	for k, v := range meta {
-		if v != "" {
-			args = append(args, "-metadata", k+"="+v)
+		// Artwork is a nicety: an unreadable file just means no cover.
+		if b, err := os.ReadFile(cover); err == nil {
+			tags.Cover = b
 		}
 	}
-	args = append(args, out)
 
-	cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("remux: %w: %s", err, strings.TrimSpace(string(output)))
+	src, err := os.Open(in)
+	if err != nil {
+		return err
 	}
-	return nil
+	defer src.Close()
+	dst, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	if err := m4a.Progressive(src, dst, filepath.Dir(out), tags); err != nil {
+		dst.Close()
+		return fmt.Errorf("remux: %w", err)
+	}
+	return dst.Close()
 }
 
 // fetchLyrics saves a `.lrc` sidecar next to audioPath, at the best sync

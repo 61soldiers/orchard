@@ -46,7 +46,7 @@ func archRelease(goarch string) (tag, asset string, err error) {
 
 // DefaultTag is the release tag for the running architecture.
 func DefaultTag() (string, error) {
-	tag, _, err := archRelease(runtime.GOARCH)
+	tag, _, err := archRelease(daemonGoArch())
 	return tag, err
 }
 
@@ -67,7 +67,7 @@ func (p *Provisioner) resolveAsset(ctx context.Context) (Asset, error) {
 	tag := p.opts.Tag
 	wantName := ""
 	if tag == "" {
-		defTag, defAsset, err := archRelease(runtime.GOARCH)
+		defTag, defAsset, err := archRelease(daemonGoArch())
 		if err != nil {
 			return Asset{}, err
 		}

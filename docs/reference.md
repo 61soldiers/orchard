@@ -79,7 +79,7 @@ export ORCHARD_API_KEY=$(openssl rand -base64 48 | tr -d '=+/')
 go run ./cmd/orchard --data-dir ./data
 ```
 
-Needs Go 1.26+, and `ffmpeg` on `PATH` before phase 4. Drive `/v1/apple/*` yourself, or point the
+Needs Go 1.26+ (nothing else: tags and cover art are written in-process, there is no ffmpeg). Drive `/v1/apple/*` yourself, or point the
 setup script at it:
 
 ```shell
@@ -608,7 +608,7 @@ Tracks are processed one at a time. The daemon's decryption service handles a si
 so concurrency there buys nothing.
 
 Files land in `<data>/library/<album>/<track number> - <title>.m4a`. The remux is a stream copy —
-audio is never re-encoded — with tags and cover art applied in the same ffmpeg pass. Unlike the
+audio is never re-encoded — with tags and cover art written in the same pass by `internal/m4a`. Unlike the
 streaming endpoint these are progressive files, so `Range` requests and seeking work.
 
 A `.lrc` sidecar lands next to the `.m4a` at the same base name whenever the track has lyrics —

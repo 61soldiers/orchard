@@ -138,6 +138,9 @@ func (m *Manager) SessionDBPath() string {
 // behind. STOREFRONT_ID is deleted at the start of every login and rewritten
 // only once the account has been cached, so require both.
 func (m *Manager) LoggedIn() bool {
+	if vm := m.sup.VM(); vm != nil {
+		return vm.LoggedIn()
+	}
 	_, ok := locateSessionDB(m.BaseDir())
 	return ok && nonEmptyFile(filepath.Join(m.BaseDir(), "STOREFRONT_ID"))
 }
@@ -305,7 +308,9 @@ func (m *Manager) Login(ctx context.Context, appleID, password string) (Status, 
 
 	// A stale 2fa.txt would be consumed by the new run before the user ever
 	// sees a prompt, so clear it first.
-	_ = os.Remove(filepath.Join(m.BaseDir(), twoFAFile))
+	if m.sup.VM() == nil {
+		_ = os.Remove(filepath.Join(m.BaseDir(), twoFAFile))
+	}
 
 	m.setState(StateStarting, "")
 	if err := m.sup.Start(ctx, &wrapper.Login{AppleID: appleID, Password: password}); err != nil {
@@ -341,13 +346,20 @@ func (m *Manager) Submit2FA(ctx context.Context, code string) (Status, error) {
 		return m.Status(), ErrNot2FA
 	}
 
-	dir := m.BaseDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return m.Status(), err
-	}
-	// No trailing newline: upstream reads exactly six characters.
-	if err := os.WriteFile(filepath.Join(dir, twoFAFile), []byte(code), 0o600); err != nil {
-		return m.Status(), fmt.Errorf("write 2FA code: %w", err)
+	if vm := m.sup.VM(); vm != nil {
+		// The session is on the guest's disk: the code goes in over the console.
+		if err := vm.Send2FA(code); err != nil {
+			return m.Status(), fmt.Errorf("send 2FA code: %w", err)
+		}
+	} else {
+		dir := m.BaseDir()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return m.Status(), err
+		}
+		// No trailing newline: upstream reads exactly six characters.
+		if err := os.WriteFile(filepath.Join(dir, twoFAFile), []byte(code), 0o600); err != nil {
+			return m.Status(), fmt.Errorf("write 2FA code: %w", err)
+		}
 	}
 
 	st, err := m.waitFor(ctx, readyTimeout, StateReady, StateFailed)
@@ -364,6 +376,14 @@ func (m *Manager) Submit2FA(ctx context.Context, code string) (Status, error) {
 // from the process argv and proves the persisted session works unattended,
 // which is what every later restart relies on.
 func (m *Manager) finishLogin(ctx context.Context) (Status, error) {
+	if vm := m.sup.VM(); vm != nil {
+		// The session files are on the guest's disk, out of sight. The daemon
+		// reaching ready after a login is the proof.
+		if err := vm.MarkLoggedIn(); err != nil {
+			m.setState(StateFailed, err.Error())
+			return m.Status(), err
+		}
+	}
 	if !m.LoggedIn() {
 		m.setState(StateFailed, "login reported success but no session was written")
 		return m.Status(), errors.New("no session was written")
@@ -388,6 +408,16 @@ func (m *Manager) finishLogin(ctx context.Context) (Status, error) {
 func (m *Manager) Logout(ctx context.Context) error {
 	if err := m.sup.Stop(ctx); err != nil {
 		return err
+	}
+	if vm := m.sup.VM(); vm != nil {
+		if err := vm.Forget(); err != nil {
+			return fmt.Errorf("forget the login: %w", err)
+		}
+		m.mu.Lock()
+		m.storefront, m.subscribed = "", false
+		m.mu.Unlock()
+		m.setState(StateUnconfigured, "")
+		return nil
 	}
 	base := m.BaseDir()
 	// mpl_db/ and a bare kvs.sqlitedb (+ its -wal/-shm) cover both wrapper
