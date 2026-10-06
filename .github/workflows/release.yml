@@ -1,0 +1,139 @@
+name: SemVer CI/CD & Build
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - mvp
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Nothing is tagged or built from a tree whose tests fail.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  # Calculate the next version from the commit messages, tag it and publish the
+  # release with its notes. Orchard has no version file to bump, so unlike Elbert
+  # there is no `ci(release):` commit to push back and the default GITHUB_TOKEN is
+  # enough (no protected-branch bypass App needed).
+  release:
+    needs: test
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.semrel.outputs.new_release_version }}
+      tag: ${{ steps.semrel.outputs.new_release_git_tag }}
+      released: ${{ steps.semrel.outputs.new_release_published }}
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Run Semantic Release
+        id: semrel
+        uses: cycjimmy/semantic-release-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build the server for every platform it runs on — main only.
+  #
+  # dev and mvp still get a tagged prerelease with notes from the release job above,
+  # but no binaries: release assets count against the account's storage, and
+  # prereleases shipped a full set on every push (Elbert's release workflow does the
+  # same). Only a stable release on main is built and has assets attached.
+  build:
+    needs: release
+    if: needs.release.outputs.released == 'true' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          VER="${{ needs.release.outputs.version }}"
+          NAME="orchard_${VER}_${GOOS}_${GOARCH}"
+          EXE=orchard
+          [ "$GOOS" = windows ] && EXE=orchard.exe
+          mkdir -p "stage/$NAME"
+          go build -trimpath -ldflags="-s -w -buildid= -X main.version=${VER}" -o "stage/$NAME/$EXE" ./cmd/orchard
+          cp README.md LICENSE "stage/$NAME/"
+          mkdir -p dist
+          if [ "$GOOS" = windows ]; then
+            (cd stage && zip -qr "../dist/$NAME.zip" "$NAME")
+          else
+            tar -czf "dist/$NAME.tar.gz" -C stage "$NAME"
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}-artifacts
+          path: dist/*
+          if-no-files-found: error
+          # Only needed until the publish job below attaches them to the release.
+          retention-days: 1
+
+  # Upload all artifacts to the release in one shot (avoids race conditions)
+  publish:
+    needs: [release, build]
+    if: needs.release.outputs.released == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > checksums.txt && cat checksums.txt
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.release.outputs.tag }}" dist/* \
+            --clobber --repo "${{ github.repository }}"

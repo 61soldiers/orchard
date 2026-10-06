@@ -3,6 +3,7 @@ module orchard
 go 1.26.5
 
 require (
+	github.com/Eyevinn/mp4ff v0.56.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/grafov/m3u8 v0.12.1
 	github.com/itouakirai/mp4ff v0.0.0-20250930132656-98812935a1c7
@@ -12,7 +13,6 @@ require (
 )
 
 require (
-	github.com/Eyevinn/mp4ff v0.56.0 // indirect
 	github.com/chmike/cmac-go v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

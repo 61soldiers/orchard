@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -90,6 +89,15 @@ type Supervisor struct {
 	// unknown -K and never print "listening key request on". Guarded by mu.
 	keyPort bool
 
+	// vm is set when the daemon runs in the guest (see runner). It holds the
+	// console the guest is driven through and the login it keeps.
+	vm *VMSession
+
+	// listening is set once the daemon printed its ready line. Behind QEMU's port
+	// forwards a connection succeeds before anything listens in the guest, so
+	// dialling alone proves nothing there. Guarded by mu.
+	listening bool
+
 	// gen identifies the current daemon. Start and Stop both bump it, so the
 	// goroutine watching a process can tell whether its exit is still news —
 	// see the comment in Start. Guarded by mu.
@@ -102,8 +110,15 @@ func NewSupervisor(prov *Provisioner, cfg Config, onEvent func(Event)) *Supervis
 	if cfg.Host == "" {
 		cfg.Host = "127.0.0.1"
 	}
-	return &Supervisor{prov: prov, cfg: cfg, onEvent: onEvent}
+	s := &Supervisor{prov: prov, cfg: cfg, onEvent: onEvent}
+	if runner() == runQEMU {
+		s.vm = newVMSession(prov.Dir())
+	}
+	return s
 }
+
+// VM is the guest's login and console when the daemon runs in one, else nil.
+func (s *Supervisor) VM() *VMSession { return s.vm }
 
 // Running reports whether a daemon process is alive.
 func (s *Supervisor) Running() bool {
@@ -158,15 +173,48 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 		args = append(args, "-L", login.AppleID+":"+login.Password, "-F")
 	}
 
-	cmd := daemonCommand(s.prov.Dir(), info, args)
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
+	if err := prepareLaunch(s.prov.Dir(), info); err != nil {
+		return fmt.Errorf("prepare wrapper: %w", err)
 	}
-	cmd.Stdout = io.Discard
+	cmd, err := daemonCommand(s.prov.Dir(), info, args)
+	if err != nil {
+		return fmt.Errorf("start wrapper: %w", err)
+	}
 
+	var (
+		stderr io.Reader
+		closer io.Closer = nopCloser{}
+	)
+	if s.vm != nil {
+		// The guest's console is QEMU's stdout, and QEMU's own complaints are on
+		// its stderr: read both as one stream.
+		pr, pw := io.Pipe()
+		cmd.Stdout, cmd.Stderr = pw, pw
+		stderr, closer = pr, pw
+	} else {
+		pipe, err := cmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		cmd.Stdout = io.Discard
+		stderr = pipe
+	}
+	if s.vm != nil {
+		// The guest reads its commands (a 2FA code, a heartbeat) from here.
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			return err
+		}
+		s.vm.attach(in)
+	}
+
+	s.mu.Lock()
+	s.listening = false
+	s.mu.Unlock()
 	if err := cmd.Start(); err != nil {
+		if s.vm != nil {
+			s.vm.detach()
+		}
 		return fmt.Errorf("start wrapper: %w", err)
 	}
 
@@ -180,6 +228,7 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 	go s.scan(stderr)
 	go func() {
 		err := cmd.Wait()
+		_ = closer.Close()
 		// Only the daemon this supervisor still considers current gets to report
 		// its exit. A Stop() — including the one Start() does to replace a
 		// running daemon — bumps the generation before signalling, so the kill it
@@ -196,6 +245,9 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 			s.running = false
 		}
 		s.mu.Unlock()
+		if s.vm != nil && current {
+			s.vm.detach()
+		}
 		close(done)
 		if current {
 			s.emit(Event{Kind: EventExited, Err: err})
@@ -225,13 +277,12 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	// proot running with --kill-on-exit, so either way killing it tears down
 	// every descendant. It installs a SIGINT handler, so that arrives; SIGKILL
 	// always works if it does not.
-	pid := cmd.Process.Pid
-	_ = syscall.Kill(pid, syscall.SIGINT)
+	interrupt(cmd.Process)
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -248,6 +299,9 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	// above, so marking the daemon stopped is this caller's job.
 	s.cmd, s.done, s.running = nil, nil, false
 	s.mu.Unlock()
+	if s.vm != nil {
+		s.vm.detach()
+	}
 	return nil
 }
 
@@ -266,6 +320,22 @@ func (s *Supervisor) WaitListening(ctx context.Context, timeout time.Duration) e
 	for {
 		if !s.Running() {
 			return errors.New("wrapper exited before its services came up")
+		}
+		if s.vm != nil {
+			s.mu.Lock()
+			up := s.listening
+			s.mu.Unlock()
+			if !up {
+				if time.Now().After(deadline) {
+					return errors.New("timed out waiting for wrapper services")
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+				}
+				continue
+			}
 		}
 		allUp := true
 		for _, p := range ports {
@@ -342,6 +412,9 @@ func (s *Supervisor) scan(r io.Reader) {
 			s.emit(Event{Kind: EventAccountCached, Storefront: storefront, Subscribed: subscribed})
 
 		case strings.Contains(line, readyLine):
+			s.mu.Lock()
+			s.listening = true
+			s.mu.Unlock()
 			s.emit(Event{Kind: EventListening, Storefront: storefront, Subscribed: subscribed})
 		}
 	}
@@ -364,3 +437,7 @@ func wrapperHasKeyPort(binPath string) bool {
 	out, _ := exec.Command(binPath, "-h").CombinedOutput()
 	return bytes.Contains(out, []byte("key-port"))
 }
+
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }

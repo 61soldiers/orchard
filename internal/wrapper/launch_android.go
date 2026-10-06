@@ -35,6 +35,18 @@ import (
 // The host app passes the two paths only it knows: its nativeLibraryDir
 // (ORCHARD_ANDROID_LIB_DIR) and a writable cache dir (ORCHARD_ANDROID_TMP_DIR).
 
+// CheckSandbox is always fine on Android: proot supplies the isolation.
+func CheckSandbox() error { return nil }
+
+// runner is native: the daemon's own ABI is the host's, with proot for paths.
+func runner() runnerKind { return runNative }
+
+// prepareLaunch has nothing to do: the tree ships in the APK.
+func prepareLaunch(string, ProvisionInfo) error { return nil }
+
+// ProbeSandbox is never called on Android: proot supplies the isolation.
+func ProbeSandbox() error { return nil }
+
 const (
 	androidLibDirEnv = "ORCHARD_ANDROID_LIB_DIR"
 	androidTmpDirEnv = "ORCHARD_ANDROID_TMP_DIR"
@@ -56,7 +68,7 @@ const (
 // entirely from binds.
 const sessionDirRel = "data/data/com.apple.android.music/files"
 
-func daemonCommand(dir string, info ProvisionInfo, args []string) *exec.Cmd {
+func daemonCommand(dir string, info ProvisionInfo, args []string) (*exec.Cmd, error) {
 	libDir := os.Getenv(androidLibDirEnv)
 	tmpDir := os.Getenv(androidTmpDirEnv)
 	if tmpDir == "" {
@@ -93,7 +105,7 @@ func daemonCommand(dir string, info ProvisionInfo, args []string) *exec.Cmd {
 	)
 	// No namespace flags: proot does the isolation, and an app may not unshare.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-	return cmd
+	return cmd, nil
 }
 
 // keyPortSupported is false: the arm64 release's main has no key-template

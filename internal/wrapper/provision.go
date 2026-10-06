@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -128,7 +127,7 @@ func (p *Provisioner) Ensure(ctx context.Context) error {
 	if handled, err := p.platformProvision(); handled {
 		return err
 	}
-	if _, _, err := archRelease(runtime.GOARCH); err != nil && p.opts.URL == "" {
+	if _, _, err := archRelease(daemonGoArch()); err != nil && p.opts.URL == "" {
 		p.setInfo(ProvisionInfo{State: ProvisionUnsupported, Error: err.Error()})
 		return err
 	}
