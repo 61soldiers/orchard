@@ -72,19 +72,38 @@ On Ubuntu 24.04+, AppArmor also blocks unprivileged user namespaces. Either add
 
 ## Running without Docker
 
-No container privileges to relax, because your user already has what it needs:
+No container privileges to relax, because your user already has what it needs. From a release
+archive (see the [README](../README.md#run-the-program-linux)) or from source:
 
 ```shell
 export ORCHARD_API_KEY=$(openssl rand -base64 48 | tr -d '=+/')
 go run ./cmd/orchard --data-dir ./data
 ```
 
-Needs Go 1.26+ (nothing else: tags and cover art are written in-process, there is no ffmpeg). Drive `/v1/apple/*` yourself, or point the
-setup script at it:
+Building needs Go 1.26+ (nothing else: tags and cover art are written in-process, there is no
+ffmpeg). Sign in with `POST /v1/apple/login` and `POST /v1/apple/2fa` (below). `setup.sh` and
+`setup.ps1` are for the Docker route and refuse to run without Docker.
 
-```shell
-ORCHARD_URL=http://127.0.0.1:8080 ./setup.sh
-```
+On Linux Orchard builds the daemon's sandbox itself. `orchard __check-sandbox` says whether the host
+allows it (it exits 0, or 1 with the reason). Where it does not (Ubuntu 24.04+ by default), or on
+macOS and Windows, which have no Linux kernel, the daemon has to run in a small virtual machine, which
+the host application supplies (below).
+
+### In a virtual machine
+
+Orchard runs the daemon in a Linux guest under QEMU when the environment names them:
+
+| Variable                | Meaning                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `ORCHARD_QEMU`          | Path to `qemu-system-x86_64` (`auto` looks it up on `PATH`)                      |
+| `ORCHARD_GUEST_DIR`     | Directory with `vmlinuz`, `base.cpio.gz` and `data.img.gz`, from `cmd/guestbuild` |
+| `ORCHARD_QEMU_SHARE`    | QEMU's firmware directory (`-L`), for a bundled QEMU                             |
+| `ORCHARD_RUNNER`        | Force `native`, `proot` or `qemu` (default: native, then proot, then qemu)       |
+| `ORCHARD_PROOT`         | Path to a static `proot`, used where user namespaces are blocked                 |
+| `ORCHARD_EXIT_WITH_PARENT` | `1`: shut down when the process that started Orchard is gone                  |
+
+The Apple login then lives on the guest's disk, which the host cannot read. `CLAUDE.md` explains how
+that works and what costs a debugging session.
 
 ## Configuration
 
@@ -114,6 +133,9 @@ The API key is read **only** from the environment, never a flag — `argv` is wo
 | `ORCHARD_RATE_LIMIT_BURST`       | `--rate-limit-burst`       | `40`           | Burst size for `ORCHARD_RATE_LIMIT`                 |
 | `ORCHARD_APPLE_RATE_LIMIT`       | `--apple-rate-limit`       | `5`            | Requests/sec Orchard sends to Apple's catalog API   |
 | `ORCHARD_APPLE_RATE_LIMIT_BURST` | `--apple-rate-limit-burst` | `10`           | Burst size for `ORCHARD_APPLE_RATE_LIMIT`           |
+
+The variables for running the daemon in a virtual machine are in
+[Running without Docker](#running-without-docker). `orchard --version` prints the release.
 
 ## API
 
