@@ -199,7 +199,11 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 		cmd.Stdout = io.Discard
 		stderr = pipe
 	}
+	consoleAt := ""
 	if s.vm != nil {
+		consoleAt = consoleAddr(cmd)
+	}
+	if s.vm != nil && consoleAt == "" {
 		// The guest reads its commands (a 2FA code, a heartbeat) from here.
 		in, err := cmd.StdinPipe()
 		if err != nil {
@@ -216,6 +220,22 @@ func (s *Supervisor) Start(ctx context.Context, login *Login) error {
 			s.vm.detach()
 		}
 		return fmt.Errorf("start wrapper: %w", err)
+	}
+
+	if consoleAt != "" {
+		// The console is a TCP socket (see consoleAddr): the guest's output comes
+		// back over it, and so do the commands the host sends.
+		conn, err := dialConsole(consoleAt, 20*time.Second)
+		if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			_ = closer.Close()
+			return fmt.Errorf("connect to the virtual machine's console: %w", err)
+		}
+		if w, ok := closer.(io.Writer); ok {
+			go func() { _, _ = io.Copy(w, conn) }()
+		}
+		s.vm.attach(conn)
 	}
 
 	done := make(chan struct{})

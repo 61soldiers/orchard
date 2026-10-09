@@ -225,7 +225,7 @@ func qemuCommand(dir string, args []string) (*exec.Cmd, error) {
 		"-device", "virtio-net-pci,netdev=net0,romfile=",
 		// The console is how the daemon's output reaches Orchard and how a 2FA
 		// code reaches the daemon.
-		"-chardev", "stdio,id=con,signal=off",
+		"-chardev", consoleChardev(),
 		"-serial", "chardev:con",
 		"-fw_cfg", "name=opt/orchard/args,file=" + argsFile.Name(),
 	}
@@ -239,6 +239,62 @@ func qemuCommand(dir string, args []string) (*exec.Cmd, error) {
 	cmd := exec.Command(c.Bin, cmdline...)
 	cmd.Dir = work
 	return cmd, nil
+}
+
+// consoleChardev is how the guest's serial console reaches Orchard. QEMU's stdio
+// backend is enough everywhere but Windows, where it never delivers what is
+// written to a pipe: the guest saw its console close, powered itself off 40 s
+// after boot (no heartbeat) and a 2FA code never arrived. There the console is
+// a TCP socket on the loopback instead (the daemon's output and the host's
+// commands both travel over it), and QEMU waits for Orchard to connect.
+func consoleChardev() string {
+	if runtime.GOOS != "windows" {
+		return "stdio,id=con,signal=off"
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "stdio,id=con,signal=off"
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return fmt.Sprintf("socket,id=con,host=127.0.0.1,port=%d,server=on,wait=on", port)
+}
+
+// consoleAddr is the address of the console socket in a QEMU command line, or "".
+func consoleAddr(cmd *exec.Cmd) string {
+	for _, a := range cmd.Args {
+		if !strings.HasPrefix(a, "socket,id=con,") {
+			continue
+		}
+		var host, port string
+		for _, kv := range strings.Split(a, ",") {
+			switch {
+			case strings.HasPrefix(kv, "host="):
+				host = strings.TrimPrefix(kv, "host=")
+			case strings.HasPrefix(kv, "port="):
+				port = strings.TrimPrefix(kv, "port=")
+			}
+		}
+		if host != "" && port != "" {
+			return net.JoinHostPort(host, port)
+		}
+	}
+	return ""
+}
+
+// dialConsole connects to the console socket once QEMU is listening on it.
+func dialConsole(addr string, within time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(within)
+	for {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			return c, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // guestCPU is the CPU model every accelerator is asked for. The daemon needs
