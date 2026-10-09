@@ -198,7 +198,10 @@ Two packages, two concerns, one lifecycle:
   - the release archive ships `linker64` without its execute bit; the guest's init `chmod`s it;
   - the daemon's output is QEMU's **stdout** (the serial console), so the supervisor reads stdout+stderr
     as one stream in VM mode, and `WaitListening` waits for the daemon's own ready line, because QEMU's
-    port forwards accept connections long before anything listens in the guest;
+    port forwards accept connections long before anything listens in the guest. **On Windows the console is a
+    loopback TCP socket instead** (`consoleChardev`/`consoleAddr`/`dialConsole`): QEMU's `stdio` backend never
+    delivers what is written to a pipe there, so no heartbeat or 2FA code reached the guest, which powered
+    itself off 40 s after boot;
   - the Apple session lives on a disk image the host can't read, so `VMSession` replaces the file-based
     login checks: a host-side marker for "logged in", the 2FA code sent over the console as
     `ORCHARD2FA <code>`, logout deleting the disk. VM state is in `<wrapper dir>-vm/`, **beside** the
