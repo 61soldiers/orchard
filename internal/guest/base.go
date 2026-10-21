@@ -29,14 +29,16 @@ type Package struct {
 	SHA256 string
 }
 
-// Pins are the exact Alpine v3.24 packages the guest is built from. Alpine
-// keeps a release's packages until it is end-of-life, and the hashes make a
-// changed or tampered file fail loudly instead of booting something else.
+// Pins are the exact Alpine v3.24 packages the guest is built from. The hashes
+// make a changed or tampered file fail loudly instead of booting something else.
+// A stable branch keeps only the current build of each package, so a kernel
+// update there deletes the pinned URL (a release build got a 404 for 6.18.55):
+// when Fetch fails with a 404, bump the version and the hashes here.
 var Pins = map[string]map[string]Package{
 	"x86_64": {
 		"kernel": {
-			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.55-r0.apk",
-			SHA256: "a941c15fc5db26b6692fd0140fa0970da76cb12aadf3dc8306c419f21bd39c93",
+			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.58-r0.apk",
+			SHA256: "1eec55004cf7167c914c8839f46691d2bc82767e20466bff51eb45d06f8e90cc",
 		},
 		"busybox": {
 			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/busybox-static-1.37.0-r31.apk",
@@ -45,8 +47,8 @@ var Pins = map[string]map[string]Package{
 	},
 	"aarch64": {
 		"kernel": {
-			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.55-r0.apk",
-			SHA256: "c7fb892408d7fe163a18671e5c7816752976d1c67fd17794dfba794aa0d6c1ac",
+			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.58-r0.apk",
+			SHA256: "b46c51ddf572d85b2ba7b9adfaa64f4c38fc490c93d97a20ffd2418d51284085",
 		},
 		"busybox": {
 			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk",
