@@ -37,8 +37,8 @@ type Package struct {
 var Pins = map[string]map[string]Package{
 	"x86_64": {
 		"kernel": {
-			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.59-r0.apk",
-			SHA256: "73ad4774ca26c196103a00e2fb8d28ed02de4c08c11fad96e903da03dcb085f4",
+			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.60-r0.apk",
+			SHA256: "3ff658cf5aada14687238527f48526cef7a75ac8c673fc597f3a65791c86a25e",
 		},
 		"busybox": {
 			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/busybox-static-1.37.0-r31.apk",
@@ -47,8 +47,8 @@ var Pins = map[string]map[string]Package{
 	},
 	"aarch64": {
 		"kernel": {
-			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.59-r0.apk",
-			SHA256: "89b68fc32d61a1483ab0d9db78b5a06144ac115fe2ee8102cb4ad7987f46d524",
+			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.60-r0.apk",
+			SHA256: "b931f14a93634469cc8930afe5d6837361325456b620b94e970bb981d841c99c",
 		},
 		"busybox": {
 			URL:    "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk",
